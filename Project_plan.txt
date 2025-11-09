@@ -1,0 +1,125 @@
+Phase 1: Project Foundation and Basic Network Communication (2 Days)
+Time Allotment: 2 Days (November 10 - November 11)
+Objective: To establish the project's foundational structure, define the communication protocols, and implement the initial connections between the User Client, Name Server, and Storage Server.
+What needs to be done:
+Project Setup:
+Create your team on GitHub Classroom and clone the repository.
+Establish clear roles and responsibilities within your team.
+Set up a development environment with the necessary C libraries.
+Communication Protocol:
+Define a clear and consistent message format for all communication between the components (Client-Name Server, Name Server-Storage Server, Client-Storage Server). This could be a simple text-based protocol or a more structured format like JSON.
+Specify the commands and their corresponding arguments.
+Core Component Initialization:
+Implement the basic server setup for the Name Server and Storage Server using TCP sockets. They should be able to listen for incoming connections.
+Implement the basic client setup to connect to the Name Server.
+Registration Process:
+Storage Server to Name Server: Upon startup, the Storage Server should connect to the Name Server and send its IP address, client-facing port, and a list of files it currently stores.
+User Client to Name Server: Upon startup, the User Client should prompt for a username and then register with the Name Server, providing its username and IP address.
+Implementation and Testing (1 Day):
+Write the code for the initial socket creation, binding, and listening on the server side.
+Write the code for the client to connect to the server.
+Test the registration process. Verify that the Name Server correctly receives and stores the information from multiple Storage Servers and User Clients. Use print statements or a simple logger to confirm the data is being exchanged correctly.
+Phase 2: Name Server Core Logic and Metadata Management (1 Day)
+Time Allotment: 1 Day (November 12)
+Objective: To implement the central intelligence of the system within the Name Server, focusing on efficient file metadata management and handling direct client requests.
+What needs to be done:
+Data Structures for Metadata:
+Design and implement an efficient in-memory data structure on the Name Server to store all file-related metadata. A hash map (for O(1) average time complexity) or a Trie (for prefix-based searches, though a hash map is likely sufficient here) would be suitable for mapping filenames to the list of Storage Servers that hold the file.
+This structure should also store access control information (owner, read/write permissions for other users) for each file.
+Direct Request Handling:
+Implement the logic for the Name Server to handle the following commands directly without forwarding to a Storage Server:
+VIEW (with -a, -l, -al flags): The Name Server will use its metadata to list the appropriate files.
+INFO <filename>: The Name Server will retrieve and format the metadata for the specified file.
+LIST: The Name Server will return a list of all registered users.
+ADDACCESS and REMACCESS: The Name Server will update the access control lists in its metadata.
+Implementation and Testing (1 Day):
+Implement the chosen data structure and populate it with some dummy data for testing.
+Write the handling logic for each of the direct commands.
+Test each command from the client to ensure the Name Server provides the correct and properly formatted responses. Pay close attention to the different flags for the VIEW command.
+Phase 3: Storage Server Core Logic and Fundamental File Operations (1 Day)
+Time Allotment: 1 Day (November 13)
+Objective: To build the core functionalities of the Storage Servers, including file creation, deletion, and reading, along with ensuring data persistence.
+What needs to be done:
+Command Handling from Name Server:
+Implement the logic on the Storage Server to execute CREATE <filename> and DELETE <filename> commands received from the Name Server. After execution, the Storage Server should send an acknowledgment (ACK) back to the Name Server.
+Data Persistence:
+Ensure that any file created or modified is saved to the disk on the Storage Server's local file system. When a Storage Server restarts, it should be able to read its local directory to report its file list to the Name Server.
+Direct Client Interaction for Reading:
+Implement the logic for a client to directly connect to the Storage Server for a READ <filename> operation. The Name Server will first provide the client with the Storage Server's address and port.
+The Storage Server should be able to handle this direct connection, read the content of the requested file, and send it back to the client.
+Implementation and Testing (1 Day):
+Test the CREATE and DELETE commands. Verify that files are physically created and deleted on the Storage Server's disk and that the ACKs are sent.
+Test data persistence by restarting a Storage Server and ensuring it re-registers with the Name Server with the correct list of files.
+Test the READ operation by having a client fetch the content of a file directly from the Storage Server.
+Phase 4: Concurrent Writing and Sentence-Level Locking (1 Day)
+Time Allotment: 1 Day (November 14)
+Objective: To implement the complex WRITE functionality, which includes handling concurrent edits and ensuring data integrity through sentence-level locking.
+What needs to be done:
+Sentence Segmentation:
+Implement a robust function to parse a file's content into sentences based on the delimiters: period (.), exclamation mark (!), and question mark (?).
+Sentence Locking Mechanism:
+On the Storage Server, implement a locking mechanism (e.g., using mutexes or semaphores) to lock a specific sentence when a user initiates a WRITE command for it. This will prevent other users from writing to the same sentence simultaneously.
+Write Operation Flow:
+Implement the full WRITE command sequence:
+Client sends WRITE <filename> <sentence_number> to the Name Server.
+Name Server verifies access rights and returns the Storage Server's contact information.
+Client connects to the Storage Server and initiates the write session, which locks the sentence.
+Client sends one or more <word_index> <content> updates.
+Client sends ETIRW to finalize the write and release the lock.
+Handling Concurrent Writes:
+Consider using a temporary or "swap" file for write operations. The changes are written to the temporary file, and once the ETIRW command is received, the original file is updated atomically. This helps in managing concurrent writes and simplifies the UNDO functionality.
+Implementation and Testing (1 Day):
+Thoroughly test the sentence segmentation with various complex cases.
+Simulate concurrent write attempts from multiple clients on the same sentence to ensure the locking mechanism works correctly.
+Test writes to different sentences of the same file simultaneously to verify that concurrency is allowed at the file level.
+Test the entire WRITE flow, including multiple word updates within a single ETIRW block.
+Phase 5: Implementing Advanced User Functionalities (1 Day)
+Time Allotment: 1 Day (November 15)
+Objective: To implement the remaining user-facing features that enhance the system's capabilities.
+What needs to be done:
+Undo Functionality:
+On the Storage Server, before applying a WRITE operation, save a copy of the file's previous state. The UNDO <filename> command will revert the file to this saved state. Only one level of undo needs to be supported per file.
+Streaming Content:
+Implement the STREAM <filename> functionality. The client will connect directly to the Storage Server, which will then read the file and send it word by word, with a 0.1-second delay between each word.
+Executable Files:
+Implement the EXEC <filename> command. The Name Server will request the file content from the Storage Server. Upon receiving the content, the Name Server will execute it as a series of shell commands and capture the standard output, which is then sent back to the client.
+Implementation and Testing (1 Day):
+Test the UNDO command after a WRITE operation to ensure the file is correctly reverted.
+Test the STREAM command and verify the word-by-word output with the specified delay.
+Create a test file with some simple shell commands (e.g., echo, ls) and test the EXEC command to ensure the output is correctly captured and displayed on the client.
+Phase 6: Fulfilling System Requirements and Ensuring Robustness (1 Day)
+Time Allotment: 1 Day (November 16)
+Objective: To implement the non-functional requirements that make the system reliable, secure, and maintainable.
+What needs to be done:
+Logging:
+Implement a comprehensive logging mechanism on both the Name Server and Storage Servers. Log every request, response, and significant event with timestamps, client information, and operation details.
+Error Handling:
+Define a set of universal error codes for various failure scenarios (e.g., file not found, permission denied, server unavailable).
+Implement robust error handling throughout the system to provide clear and informative error messages to the user.
+Efficient Search and Caching:
+On the Name Server, implement a caching mechanism (e.g., Least Recently Used - LRU) for file location lookups to speed up responses for frequently accessed files.
+Access Control Enforcement:
+Rigorously enforce the access control policies for every operation that involves file access.
+Implementation and Testing (1 Day):
+Review the logs to ensure they are detailed and useful for debugging.
+Intentionally trigger various error conditions to test the error handling and ensure the correct error codes and messages are returned.
+Test the caching by repeatedly accessing the same file and observing the reduced lookup time (this might require some performance measurement).
+Attempt to perform actions without the necessary permissions to ensure access control is working correctly.
+Phase 7: Final Integration, Comprehensive Testing, and Documentation (2 Days)
+Time Allotment: 2 Days (November 17 - November 18)
+Objective: To bring all the components together, perform end-to-end testing of the complete system, and prepare the final project submission.
+What needs to be done:
+Integration Testing:
+Run the entire system with multiple User Clients and multiple Storage Servers concurrently.
+Test all functionalities in an integrated environment to identify any issues that arise from the interaction between components.
+Graceful Handling of Connections:
+Test the system's behavior when a User Client or a Storage Server disconnects abruptly and then reconnects. The system should handle these events gracefully without crashing.
+Code Cleanup and Documentation:
+Review and refactor the code for clarity, efficiency, and adherence to coding standards.
+Write clear and concise documentation that explains the project's architecture, design decisions, and instructions on how to compile and run the system.
+Final Submission:
+Ensure all code, documentation, and a README.md file are pushed to your GitHub repository before the deadline.
+Implementation and Testing (2 Days):
+Dedicate this time to extensive testing of the entire application as a whole. Create a comprehensive test plan that covers all user functionalities and system requirements.
+Fix any bugs discovered during integration testing.
+Finalize all project documentation and prepare for a potential demonstration.

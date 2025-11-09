@@ -1,4 +1,5 @@
-# Docs++: Phase 1 Completion Report
+# Docs++: 
+## Phase 1 Completion Report
 
 This document outlines the progress and implementation details for Phase 1 of the Docs++ project.
 
@@ -61,3 +62,34 @@ The following test scenarios were successfully executed to validate the Phase 1 
 
 In all cases, the Name Server correctly received, parsed, and logged the registration details for all connecting components, demonstrating a robust foundation for the next phases.
 
+---
+## Phase 2 Completion Report
+
+Phase 2 builds upon the basic network foundation by implementing the core logic and state management within the Name Server.
+
+### Implemented Features
+
+1.  **In-Memory Metadata Storage**: The Name Server now maintains state. It uses in-memory linked lists to store information about registered users and available files.
+2.  **Concurrency Control**: Critical sections of code where shared data structures (the linked lists) are modified are now protected by a `pthread_mutex`. This prevents race conditions and ensures data integrity in the multi-threaded environment.
+3.  **Interactive User Client**: The client is no longer a single-shot application. It now features an interactive command-line loop, allowing users to issue multiple commands in a single session.
+4.  **Direct Command Handling**: The Name Server can now directly handle and respond to the following client commands:
+    *   `LIST`: Lists all registered users.
+    *   `VIEW`: Lists all available files. Supports a `-l` flag to show detailed information like word count, character count, and owner.
+
+### Important Design Choices
+
+*   **Data Structures**: We have used **singly linked lists** as our primary in-memory data structures. While not the most performant for lookups (O(n)), they are simple to implement in C without external libraries and are sufficient for the current scale of the project. This choice prioritizes implementation simplicity.
+*   **Concurrency Control**: A **single, global mutex** (`pthread_mutex_t`) is used to protect all shared data. This coarse-grained locking strategy is simple to implement and is effective at preventing all race conditions, though it may limit true parallelism in future, more complex scenarios.
+*   **Request-Response Protocol**: The communication model has been upgraded to a full request-response pattern. A special token, `__END__`, is used to signify the end of a multi-line server response, making the client's receiving logic robust.
+
+### Test Cases Executed
+
+The following test scenarios were successfully executed to validate Phase 2.
+
+| Test Case ID | Description                                                    | Status   |
+|--------------|----------------------------------------------------------------|----------|
+| P2-T01       | NM stores and retains SS and UC registration data.             | ✅ Pass  |
+| P2-T02       | Client `LIST` command correctly returns a list of all users.   | ✅ Pass  |
+| P2-T03       | Client `VIEW` command correctly returns a list of all files.   | ✅ Pass  |
+| P2-T04       | Client `VIEW -l` command returns a detailed, formatted table.  | ✅ Pass  |
+| P2-T05       | Data is consistent when accessed by multiple concurrent clients. | ✅ Pass  |

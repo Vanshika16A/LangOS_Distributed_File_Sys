@@ -6,6 +6,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <pthread.h>
+#include <time.h>
 
 #define MAX_BUFFER_SIZE 1024
 #define NAME_SERVER_PORT 8080
@@ -15,7 +16,44 @@ typedef struct {
     int client_socket;
     struct sockaddr_in client_addr;
 } client_info_t;
+// Represents a user with access to a file
+typedef struct AccessNode {
+    char username[50];
+    char permission; // 'R' for read, 'W' for write
+    struct AccessNode* next;
+} AccessNode;
 
+// Represents file metadata
+typedef struct FileMetadata {
+    char filename[100];
+    char owner[50];
+    int word_count;
+    int char_count;
+    time_t last_access;
+    // We'll store which SS has the file later
+    AccessNode* access_list;
+    struct FileMetadata* next;
+} FileMetadata;
+
+// Represents a connected user
+typedef struct User {
+    char username[50];
+    char ip_addr[20];
+    struct User* next;
+} User;
+// --- 2. GLOBAL VARIABLES ---
+FileMetadata* file_list_head = NULL;
+User* user_list_head = NULL;
+pthread_mutex_t data_mutex; // Mutex to protect our global lists
+// --- FUNCTION PROTOTYPES ---
+void register_user(const char* username, const char* ip_addr);
+void register_storage_server(const char* files_str);
+void handle_list_users(int sock);
+void handle_view(int sock, const char* flags, const char* username);
+void handle_info(int sock, const char* filename);
+void handle_add_access(int sock, const char* filename, const char* user, const char* perm);
+void handle_rem_access(int sock, const char* filename, const char* user);
+// --- END OF PROTOTYPES ---
 void* handle_connection(void* client_info_p) {
     client_info_t* client_info = (client_info_t*)client_info_p;
     int sock = client_info->client_socket;
@@ -23,48 +61,185 @@ void* handle_connection(void* client_info_p) {
     
     char buffer[MAX_BUFFER_SIZE];
     int read_size;
-
+    char current_user[50] = "anonymous"; // Track user for this session
     // Read the message from the client/server
     if ((read_size = recv(sock, buffer, MAX_BUFFER_SIZE, 0)) > 0) {
-        buffer[read_size] = '\0'; // Null-terminate the string
+        buffer[read_size] = '\0';
+        char* command = strtok(buffer, ";\n");
 
-        // --- Protocol Parsing Logic ---
-        char* token = strtok(buffer, ";\n");
+        if (command != NULL) {
+            printf("[Name Server] Received Command: %s\n", command);
 
-        if (token != NULL) {
-            if (strcmp(token, "REGISTER_SS") == 0) {
-                // This is a Storage Server
-                char* ss_ip = strtok(NULL, ";\n");
-                char* client_port = strtok(NULL, ";\n");
+            if (strcmp(command, "REGISTER_SS") == 0) {
+                strtok(NULL, ";\n"); // Skip SS IP
+                strtok(NULL, ";\n"); // Skip SS Port
                 char* files = strtok(NULL, ";\n");
-                printf("[Name Server] Received Storage Server Registration.\n");
-                printf("  -> SS IP: %s\n", ss_ip);
-                printf("  -> SS Client Port: %s\n", client_port);
-                printf("  -> Files: %s\n\n", files ? files : "None");
-                // TODO: Store this information in a proper data structure
+                if (files) register_storage_server(files);
+
+                // ADD THIS BLOCK TO SEND A RESPONSE
+                char response[] = "ACK_SS_REG\n__END__\n";
+                send(sock, response, strlen(response), 0);
             } 
-            else if (strcmp(token, "REGISTER_CLIENT") == 0) {
-                // This is a User Client
+            else if (strcmp(command, "REGISTER_CLIENT") == 0) {
                 char* username = strtok(NULL, ";\n");
-                printf("[Name Server] Received User Client Registration.\n");
-                printf("  -> Username: %s\n", username);
-                printf("  -> Client IP: %s\n\n", client_ip);
-                 // TODO: Store this information
-            } else {
-                fprintf(stderr, "Unknown command received.\n");
+                if (username) {
+                    register_user(username, client_ip);
+                    strcpy(current_user, username); // Set user for this session
+                }
+
+                // ADD THIS BLOCK TO SEND A RESPONSE
+                char response[] = "ACK_CLIENT_REG\n__END__\n";
+                send(sock, response, strlen(response), 0);
+            }
+            else if (strcmp(command, "LIST_USERS") == 0) {
+                handle_list_users(sock);
+            }
+            else if (strcmp(command, "VIEW") == 0) {
+                char* flags = strtok(NULL, ";\n");
+                handle_view(sock, flags, current_user);
+            }
+            else if (strcmp(command, "INFO") == 0) {
+                char* filename = strtok(NULL, ";\n");
+                if (filename) handle_info(sock, filename);
+            }
+             else if (strcmp(command, "ADDACCESS") == 0) {
+                char* filename = strtok(NULL, ";\n");
+                char* user = strtok(NULL, ";\n");
+                char* perm = strtok(NULL, ";\n");
+                if (filename && user && perm) handle_add_access(sock, filename, user, perm);
+            }
+            // ... add other command handlers here ...
+            else {
+                char response[] = "ERROR: Unknown command.\n__END__\n";
+                send(sock, response, strlen(response), 0);
             }
         }
     }
+    // ... (keep cleanup code from Phase 1) ...
+}
+// --- HELPER FUNCTIONS FOR REGISTRATION ---
 
-    if (read_size == 0) {
-        printf("Client disconnected.\n");
-    } else if (read_size == -1) {
-        perror("recv failed");
+void register_user(const char* username, const char* ip_addr) {
+    pthread_mutex_lock(&data_mutex);
+
+    // Create new user node
+    User* newUser = (User*)malloc(sizeof(User));
+    strcpy(newUser->username, username);
+    strcpy(newUser->ip_addr, ip_addr);
+    newUser->next = user_list_head;
+    user_list_head = newUser;
+
+    printf("[Data] Registered user '%s' from IP %s\n", username, ip_addr);
+    pthread_mutex_unlock(&data_mutex);
+}
+
+// In a real system, SS registration would be more complex. For now,
+// we just use it to populate the file list.
+void register_storage_server(const char* files_str) {
+    pthread_mutex_lock(&data_mutex);
+    
+    char files_copy[1024];
+    strcpy(files_copy, files_str);
+
+    char* file_token = strtok(files_copy, ",");
+    while (file_token != NULL) {
+        // Check if file already exists to avoid duplicates
+        int found = 0;
+        for (FileMetadata* current = file_list_head; current != NULL; current = current->next) {
+            if (strcmp(current->filename, file_token) == 0) {
+                found = 1;
+                break;
+            }
+        }
+
+        if (!found) {
+            FileMetadata* newFile = (FileMetadata*)malloc(sizeof(FileMetadata));
+            strcpy(newFile->filename, file_token);
+            strcpy(newFile->owner, "system"); // Default owner
+            newFile->word_count = 100; // Dummy data
+            newFile->char_count = 500; // Dummy data
+            newFile->last_access = time(NULL);
+            newFile->access_list = NULL; // No users have access yet
+            newFile->next = file_list_head;
+            file_list_head = newFile;
+            printf("[Data] Registered file '%s'\n", file_token);
+        }
+        file_token = strtok(NULL, ",");
+    }
+    pthread_mutex_unlock(&data_mutex);
+}
+// --- 5. IMPLEMENT COMMAND HANDLERS ---
+
+void handle_list_users(int sock) {
+    char response[MAX_BUFFER_SIZE * 2] = ""; // Larger buffer for response
+    
+    pthread_mutex_lock(&data_mutex);
+    strcat(response, "Registered Users:\n");
+    strcat(response, "-----------------\n");
+    for (User* current = user_list_head; current != NULL; current = current->next) {
+        strcat(response, "-> ");
+        strcat(response, current->username);
+        strcat(response, "\n");
+    }
+    pthread_mutex_unlock(&data_mutex);
+
+    strcat(response, "__END__\n");
+    send(sock, response, strlen(response), 0);
+}
+
+void handle_view(int sock, const char* flags, const char* username) {
+    // In a real system, VIEW would filter based on username access.
+    // For now, -a shows all, and default shows all.
+    char response[MAX_BUFFER_SIZE * 4] = "";
+    
+    int show_details = (flags && (strstr(flags, "l") != NULL));
+
+    pthread_mutex_lock(&data_mutex);
+
+    if (show_details) {
+         snprintf(response, sizeof(response), "| %-20s | %-8s | %-8s | %-10s |\n", "Filename", "Words", "Chars", "Owner");
+         strcat(response, "-------------------------------------------------------------\n");
     }
 
-    close(sock);
-    free(client_info);
-    pthread_exit(NULL);
+    for (FileMetadata* current = file_list_head; current != NULL; current = current->next) {
+        char line[256];
+        if (show_details) {
+            snprintf(line, sizeof(line), "| %-20s | %-8d | %-8d | %-10s |\n", 
+                current->filename, current->word_count, current->char_count, current->owner);
+        } else {
+            snprintf(line, sizeof(line), "%s\n", current->filename);
+        }
+        // Prevent buffer overflow
+        if (strlen(response) + strlen(line) < sizeof(response) - 100) {
+            strcat(response, line);
+        }
+    }
+    pthread_mutex_unlock(&data_mutex);
+    
+    strcat(response, "__END__\n");
+    send(sock, response, strlen(response), 0);
+}
+
+// NOTE: Stubs for other handlers. Implementation would be similar.
+void handle_info(int sock, const char* filename) {
+    // TODO: Find the file, format its details, send back.
+    char response[1024];
+    snprintf(response, sizeof(response), "INFO for '%s' is not yet implemented.\n__END__\n", filename);
+    send(sock, response, strlen(response), 0);
+}
+
+void handle_add_access(int sock, const char* filename, const char* user, const char* perm) {
+    // TODO: Find the file, add user to its access_list.
+    char response[1024];
+    snprintf(response, sizeof(response), "ADDACCESS for '%s' is not yet implemented.\n__END__\n", filename);
+    send(sock, response, strlen(response), 0);
+}
+
+void handle_rem_access(int sock, const char* filename, const char* user) {
+     // TODO: Find the file, remove user from its access_list.
+    char response[1024];
+    snprintf(response, sizeof(response), "REMACCESS for '%s' is not yet implemented.\n__END__\n", filename);
+    send(sock, response, strlen(response), 0);
 }
 
 

@@ -7,53 +7,28 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 #include <time.h>
+#include "CRWD.c"
 
 #define MAX_BUFFER_SIZE 1024
 #define NAME_SERVER_PORT 8080
 
-// A struct to pass to our thread function
-typedef struct {
-    int client_socket;
-    struct sockaddr_in client_addr;
-} client_info_t;
-// Represents a user with access to a file
-typedef struct AccessNode {
-    char username[50];
-    char permission; // 'R' for read, 'W' for write
-    struct AccessNode* next;
-} AccessNode;
 
-// Represents file metadata
-typedef struct FileMetadata {
-    char filename[100];
-    char owner[50];
-    int word_count;
-    int char_count;
-    time_t last_access;
-    // We'll store which SS has the file later
-    AccessNode* access_list;
-    struct FileMetadata* next;
-} FileMetadata;
+void handle_create(int sock, const char* filename, const char* username);
+void handle_read(int sock, const char* filename, const char* username);
+void handle_write(int sock, const char* filename, int sentence_num, const char* username);
+void handle_delete(int sock, const char* filename, const char* username);
+void handle_delete_metadata(int sock, const char* filename, const char* username);
 
-// Represents a connected user
-typedef struct User {
-    char username[50];
-    char ip_addr[20];
-    struct User* next;
-} User;
-// --- 2. GLOBAL VARIABLES ---
-FileMetadata* file_list_head = NULL;
-User* user_list_head = NULL;
-pthread_mutex_t data_mutex; // Mutex to protect our global lists
-// --- FUNCTION PROTOTYPES ---
+
 void register_user(const char* username, const char* ip_addr);
-void register_storage_server(const char* files_str);
+void register_storage_server(const char* ip, int port);
 void handle_list_users(int sock);
 void handle_view(int sock, const char* flags, const char* username);
 void handle_info(int sock, const char* filename);
 void handle_add_access(int sock, const char* filename, const char* user, const char* perm);
 void handle_rem_access(int sock, const char* filename, const char* user);
-// --- END OF PROTOTYPES ---
+
+
 void* handle_connection(void* client_info_p) {
     client_info_t* client_info = (client_info_t*)client_info_p;
     int sock = client_info->client_socket;
@@ -61,9 +36,8 @@ void* handle_connection(void* client_info_p) {
     
     char buffer[MAX_BUFFER_SIZE];
     int read_size;
-    char current_user[50] = "anonymous"; // Track user for this session
-    // Read the message from the client/server
-    if ((read_size = recv(sock, buffer, MAX_BUFFER_SIZE, 0)) > 0) {
+    char current_user[50] = "anonymous"; // Is it needed?
+    if ((read_size = recv(sock, buffer, MAX_BUFFER_SIZE - 1, 0)) > 0) {
         buffer[read_size] = '\0';
         char* command = strtok(buffer, ";\n");
 
@@ -71,12 +45,11 @@ void* handle_connection(void* client_info_p) {
             printf("[Name Server] Received Command: %s\n", command);
 
             if (strcmp(command, "REGISTER_SS") == 0) {
-                strtok(NULL, ";\n"); // Skip SS IP
-                strtok(NULL, ";\n"); // Skip SS Port
-                char* files = strtok(NULL, ";\n");
-                if (files) register_storage_server(files);
-
-                // ADD THIS BLOCK TO SEND A RESPONSE
+                char* ip = strtok(NULL, ";\n");
+                char* port_str = strtok(NULL, ";\n");
+                if (ip && port_str) {
+                    register_storage_server(ip, atoi(port_str));
+                }
                 char response[] = "ACK_SS_REG\n__END__\n";
                 send(sock, response, strlen(response), 0);
             } 
@@ -86,12 +59,23 @@ void* handle_connection(void* client_info_p) {
                     register_user(username, client_ip);
                     strcpy(current_user, username); // Set user for this session
                 }
-
-                // ADD THIS BLOCK TO SEND A RESPONSE
                 char response[] = "ACK_CLIENT_REG\n__END__\n";
                 send(sock, response, strlen(response), 0);
             }
-            else if (strcmp(command, "LIST_USERS") == 0) {
+            if (strcmp(current_user, "anonymous") == 0) { //additional funcionality. TO CHECK
+                pthread_mutex_lock(&data_mutex);
+                User* u = user_list_head;
+                while (u) {
+                    if(strcmp(u->ip_addr, client_ip) == 0) {
+                        strcpy(current_user, u->username);
+                        break;
+                    }
+                    u = u->next;
+                }
+                pthread_mutex_unlock(&data_mutex);
+            }
+            
+            if (strcmp(command, "LIST_USERS") == 0) {
                 handle_list_users(sock);
             }
             else if (strcmp(command, "VIEW") == 0) {
@@ -108,21 +92,55 @@ void* handle_connection(void* client_info_p) {
                 char* perm = strtok(NULL, ";\n");
                 if (filename && user && perm) handle_add_access(sock, filename, user, perm);
             }
-            // ... add other command handlers here ...
-            else {
+            else if (strcmp(command, "CREATE") == 0) {
+                char* filename = strtok(NULL, ";\n");
+                if (filename) handle_create(sock, filename, current_user);
+            }
+            else if (strcmp(command, "READ") == 0) {
+                char* filename = strtok(NULL, ";\n");
+                if (filename) handle_read(sock, filename, current_user);
+            }
+            else if (strcmp(command, "WRITE") == 0) {
+                char* filename = strtok(NULL, ";\n");
+                char* sent_num_str = strtok(NULL, ";\n");
+                if (filename && sent_num_str) {
+                    handle_write(sock, filename, atoi(sent_num_str), current_user);
+                }
+            }
+            else if (strcmp(command, "DELETE") == 0) {
+                char* filename = strtok(NULL, ";\n");
+                if (filename) handle_delete(sock, filename, current_user);
+            }
+            else if (strcmp(command, "DELETE_METADATA") == 0) {
+                char* filename = strtok(NULL, ";\n");
+                if (filename) handle_delete_metadata(sock, filename, current_user);
+            }
+            else if (strcmp(command, "REGISTER_SS") != 0 && strcmp(command, "REGISTER_CLIENT") != 0) {
                 char response[] = "ERROR: Unknown command.\n__END__\n";
                 send(sock, response, strlen(response), 0);
             }
         }
     }
-    // ... (keep cleanup code from Phase 1) ...
+    free(client_info);
+    close(sock);
+    return NULL;
 }
 // --- HELPER FUNCTIONS FOR REGISTRATION ---
 
 void register_user(const char* username, const char* ip_addr) {
     pthread_mutex_lock(&data_mutex);
 
-    // Create new user node
+    User* current = user_list_head; 
+    while(current) {
+        if(strcmp(current->username, username) == 0) {
+            strcpy(current->ip_addr, ip_addr);
+            printf("[Data] Re-registered user '%s' from IP %s\n", username, ip_addr);
+            pthread_mutex_unlock(&data_mutex);
+            return;
+        }
+        current = current->next;
+    }
+
     User* newUser = (User*)malloc(sizeof(User));
     strcpy(newUser->username, username);
     strcpy(newUser->ip_addr, ip_addr);
@@ -133,45 +151,35 @@ void register_user(const char* username, const char* ip_addr) {
     pthread_mutex_unlock(&data_mutex);
 }
 
-// In a real system, SS registration would be more complex. For now,
-// we just use it to populate the file list.
-void register_storage_server(const char* files_str) {
+
+void register_storage_server(const char* ip, int port) {
     pthread_mutex_lock(&data_mutex);
     
-    char files_copy[1024];
-    strcpy(files_copy, files_str);
 
-    char* file_token = strtok(files_copy, ",");
-    while (file_token != NULL) {
-        // Check if file already exists to avoid duplicates
-        int found = 0;
-        for (FileMetadata* current = file_list_head; current != NULL; current = current->next) {
-            if (strcmp(current->filename, file_token) == 0) {
-                found = 1;
-                break;
-            }
+    StorageServer* current = ss_list_head;
+    while(current) {
+        if(strcmp(current->ip_addr, ip) == 0 && current->port == port) {
+            printf("[Data] Re-registered SS at %s:%d\n", ip, port);
+            pthread_mutex_unlock(&data_mutex);
+            return;
         }
-
-        if (!found) {
-            FileMetadata* newFile = (FileMetadata*)malloc(sizeof(FileMetadata));
-            strcpy(newFile->filename, file_token);
-            strcpy(newFile->owner, "system"); // Default owner
-            newFile->word_count = 100; // Dummy data
-            newFile->char_count = 500; // Dummy data
-            newFile->last_access = time(NULL);
-            newFile->access_list = NULL; // No users have access yet
-            newFile->next = file_list_head;
-            file_list_head = newFile;
-            printf("[Data] Registered file '%s'\n", file_token);
-        }
-        file_token = strtok(NULL, ",");
+        current = current->next;
     }
+    
+    // Add new SS
+    StorageServer* newSS = (StorageServer*)malloc(sizeof(StorageServer));
+    strcpy(newSS->ip_addr, ip);
+    newSS->port = port;
+    newSS->next = ss_list_head;
+    ss_list_head = newSS;
+    printf("[Data] Registered new SS at %s:%d\n", ip, port);
+    
     pthread_mutex_unlock(&data_mutex);
 }
-// --- 5. IMPLEMENT COMMAND HANDLERS ---
+
 
 void handle_list_users(int sock) {
-    char response[MAX_BUFFER_SIZE * 2] = ""; // Larger buffer for response
+    char response[MAX_BUFFER_SIZE * 2] = ""; //bigger response buffer to account for longer responses
     
     pthread_mutex_lock(&data_mutex);
     strcat(response, "Registered Users:\n");
@@ -188,24 +196,25 @@ void handle_list_users(int sock) {
 }
 
 void handle_view(int sock, const char* flags, const char* username) {
-    // In a real system, VIEW would filter based on username access.
-    // For now, -a shows all, and default shows all.
     char response[MAX_BUFFER_SIZE * 4] = "";
-    
     int show_details = (flags && (strstr(flags, "l") != NULL));
 
     pthread_mutex_lock(&data_mutex);
 
     if (show_details) {
-         snprintf(response, sizeof(response), "| %-20s | %-8s | %-8s | %-10s |\n", "Filename", "Words", "Chars", "Owner");
-         strcat(response, "-------------------------------------------------------------\n");
+         snprintf(response, sizeof(response), "| %-20s | %-12s | %-17s |\n", "Filename", "Owner", "Location (SS)");
+         strcat(response, "---------------------------------------------------------\n");
     }
 
     for (FileMetadata* current = file_list_head; current != NULL; current = current->next) {
         char line[256];
         if (show_details) {
-            snprintf(line, sizeof(line), "| %-20s | %-8d | %-8d | %-10s |\n", 
-                current->filename, current->word_count, current->char_count, current->owner);
+            char loc[40] = "N/A";
+            if (current->ss) {
+                 snprintf(loc, 40, "%s:%d", current->ss->ip_addr, current->ss->port);
+            }
+            snprintf(line, sizeof(line), "| %-20s | %-12s | %-17s |\n", 
+                current->filename, current->owner, loc);
         } else {
             snprintf(line, sizeof(line), "%s\n", current->filename);
         }
@@ -220,9 +229,8 @@ void handle_view(int sock, const char* flags, const char* username) {
     send(sock, response, strlen(response), 0);
 }
 
-// NOTE: Stubs for other handlers. Implementation would be similar.
+
 void handle_info(int sock, const char* filename) {
-    // TODO: Find the file, format its details, send back.
     char response[1024];
     snprintf(response, sizeof(response), "INFO for '%s' is not yet implemented.\n__END__\n", filename);
     send(sock, response, strlen(response), 0);
@@ -248,6 +256,8 @@ int main() {
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_len = sizeof(client_addr);
 
+    pthread_mutex_init(&data_mutex, NULL);
+
     // 1. Create socket
     server_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (server_sock == -1) {
@@ -268,7 +278,7 @@ int main() {
     printf("[Name Server] Bind successful on port %d.\n", NAME_SERVER_PORT);
 
     // 4. Listen
-    listen(server_sock, 5);
+    listen(server_sock, 10);
     printf("[Name Server] Waiting for incoming connections...\n");
 
     // 5. Accept and handle connections
@@ -284,14 +294,17 @@ int main() {
             perror("could not create thread");
             return 1;
         }
-        // We don't join the thread because we want to handle multiple connections at once.
-        // This is called a "detached" thread model in principle.
+        
+        //to prevent leakage of resources
+        pthread_detach(thread_id);
     }
 
     if (client_sock < 0) {
         perror("accept failed");
         return 1;
     }
+    
+    pthread_mutex_destroy(&data_mutex);
 
     return 0;
 }

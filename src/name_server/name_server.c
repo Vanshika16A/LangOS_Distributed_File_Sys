@@ -7,28 +7,29 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 #include <time.h>
-#include "CRWD.c"
+#include "CRWD.c" // CRWD.c is modified to include new helper functions
 
 #define MAX_BUFFER_SIZE 1024
 #define NAME_SERVER_PORT 8080
-
 
 void handle_create(int sock, const char* filename, const char* username);
 void handle_read(int sock, const char* filename, const char* username);
 void handle_write(int sock, const char* filename, int sentence_num, const char* username);
 void handle_delete(int sock, const char* filename, const char* username);
-void handle_delete_metadata(int sock, const char* filename, const char* username);
-
-
+void handle_stream(int sock, const char* filename, const char* username);
+void handle_undo(int sock, const char* filename, const char* current_user);
+void handle_exec(int sock, const char* filename, const char* current_user);
+void handle_update_meta(int sock, const char* filename);
 void register_user(const char* username, const char* ip_addr);
-void register_storage_server(const char* ip, int port);
+void register_storage_server(const char* ip, int port, const char* file_list_str);
 void handle_list_users(int sock);
 void handle_view(int sock, const char* flags, const char* username);
-void handle_info(int sock, const char* filename);
-void handle_add_access(int sock, const char* filename, const char* user, const char* perm);
-void handle_rem_access(int sock, const char* filename, const char* user);
+void handle_info(int sock, const char* filename, const char* username);
+void handle_add_access(int sock, const char* filename, const char* target_user, const char* perm, const char* current_user);
+void handle_rem_access(int sock, const char* filename, const char* target_user, const char* current_user);
 
 
+// MODIFIED: This function now handles a persistent session
 void* handle_connection(void* client_info_p) {
     client_info_t* client_info = (client_info_t*)client_info_p;
     int sock = client_info->client_socket;
@@ -36,95 +37,151 @@ void* handle_connection(void* client_info_p) {
     
     char buffer[MAX_BUFFER_SIZE];
     int read_size;
-    char current_user[50] = "anonymous"; // Is it needed?
+    char current_user[50] = "anonymous"; // User for this session
+
+    // --- 1. Handle Initial Registration ---
+    // A persistent session MUST register first.
     if ((read_size = recv(sock, buffer, MAX_BUFFER_SIZE - 1, 0)) > 0) {
         buffer[read_size] = '\0';
         char* command = strtok(buffer, ";\n");
 
-        if (command != NULL) {
-            printf("[Name Server] Received Command: %s\n", command);
+        if (command != NULL && strcmp(command, "REGISTER_CLIENT") == 0) {
+            char* username = strtok(NULL, ";\n");
+            if (username) {
+                register_user(username, client_ip);
+                strcpy(current_user, username); // Set user for this session
+                printf("[Name Server] Registered user '%s' for session.\n", current_user);
+            }
+            char response[] = "ACK_CLIENT_REG\n__END__\n";
+            send(sock, response, strlen(response), 0);
+        } else if (command != NULL && strcmp(command, "REGISTER_SS") == 0) {
+             // --- Handle SS Registration ---
+            char* ip = strtok(NULL, ";\n");
+            char* port_str = strtok(NULL, ";\n");
+            // MODIFIED: Now parses the file list string
+            char* file_list_str = strtok(NULL, "\n"); // Get rest of the line
 
-            if (strcmp(command, "REGISTER_SS") == 0) {
-                char* ip = strtok(NULL, ";\n");
-                char* port_str = strtok(NULL, ";\n");
-                if (ip && port_str) {
-                    register_storage_server(ip, atoi(port_str));
-                }
-                char response[] = "ACK_SS_REG\n__END__\n";
-                send(sock, response, strlen(response), 0);
-            } 
-            else if (strcmp(command, "REGISTER_CLIENT") == 0) {
-                char* username = strtok(NULL, ";\n");
-                if (username) {
-                    register_user(username, client_ip);
-                    strcpy(current_user, username); // Set user for this session
-                }
-                char response[] = "ACK_CLIENT_REG\n__END__\n";
-                send(sock, response, strlen(response), 0);
+            if (ip && port_str) {
+                // MODIFIED: Pass file list to registration function
+                register_storage_server(ip, atoi(port_str), file_list_str ? file_list_str : "");
             }
-            if (strcmp(current_user, "anonymous") == 0) { //additional funcionality. TO CHECK
-                pthread_mutex_lock(&data_mutex);
-                User* u = user_list_head;
-                while (u) {
-                    if(strcmp(u->ip_addr, client_ip) == 0) {
-                        strcpy(current_user, u->username);
-                        break;
-                    }
-                    u = u->next;
-                }
-                pthread_mutex_unlock(&data_mutex);
-            }
+            char response[] = "ACK_SS_REG\n__END__\n";
+            send(sock, response, strlen(response), 0);
             
-            if (strcmp(command, "LIST_USERS") == 0) {
-                handle_list_users(sock);
-            }
-            else if (strcmp(command, "VIEW") == 0) {
-                char* flags = strtok(NULL, ";\n");
-                handle_view(sock, flags, current_user);
-            }
-            else if (strcmp(command, "INFO") == 0) {
-                char* filename = strtok(NULL, ";\n");
-                if (filename) handle_info(sock, filename);
-            }
-             else if (strcmp(command, "ADDACCESS") == 0) {
-                char* filename = strtok(NULL, ";\n");
-                char* user = strtok(NULL, ";\n");
-                char* perm = strtok(NULL, ";\n");
-                if (filename && user && perm) handle_add_access(sock, filename, user, perm);
-            }
-            else if (strcmp(command, "CREATE") == 0) {
-                char* filename = strtok(NULL, ";\n");
-                if (filename) handle_create(sock, filename, current_user);
-            }
-            else if (strcmp(command, "READ") == 0) {
-                char* filename = strtok(NULL, ";\n");
-                if (filename) handle_read(sock, filename, current_user);
-            }
-            else if (strcmp(command, "WRITE") == 0) {
-                char* filename = strtok(NULL, ";\n");
-                char* sent_num_str = strtok(NULL, ";\n");
-                if (filename && sent_num_str) {
-                    handle_write(sock, filename, atoi(sent_num_str), current_user);
-                }
-            }
-            else if (strcmp(command, "DELETE") == 0) {
-                char* filename = strtok(NULL, ";\n");
-                if (filename) handle_delete(sock, filename, current_user);
-            }
-            else if (strcmp(command, "DELETE_METADATA") == 0) {
-                char* filename = strtok(NULL, ";\n");
-                if (filename) handle_delete_metadata(sock, filename, current_user);
-            }
-            else if (strcmp(command, "REGISTER_SS") != 0 && strcmp(command, "REGISTER_CLIENT") != 0) {
-                char response[] = "ERROR: Unknown command.\n__END__\n";
-                send(sock, response, strlen(response), 0);
+            // This is an SS connection, not a client. Close it.
+            free(client_info);
+            close(sock);
+            return NULL;
+
+        } else {
+            // Not a valid first command
+            printf("[Name Server] Invalid initial command. Closing connection.\n");
+            free(client_info);
+            close(sock);
+            return NULL;
+        }
+    } else {
+        // Client connected and immediately disconnected
+        free(client_info);
+        close(sock);
+        return NULL;
+    }
+
+    // --- 2. Handle Command Loop for Registered Client ---
+    while ((read_size = recv(sock, buffer, MAX_BUFFER_SIZE - 1, 0)) > 0) {
+        buffer[read_size] = '\0';
+        char* command = strtok(buffer, ";\n");
+
+        if (command == NULL) continue;
+
+        printf("[Name Server] Received Command: %s from user: %s\n", command, current_user);
+        
+        // REMOVED: The "anonymous" user check. User is now known.
+
+        if (strcmp(command, "LIST_USERS") == 0) {
+            handle_list_users(sock);
+        }
+        else if (strcmp(command, "VIEW") == 0) {
+            char* flags = strtok(NULL, ";\n");
+            handle_view(sock, flags, current_user);
+        }
+        else if (strcmp(command, "INFO") == 0) {
+            char* filename = strtok(NULL, ";\n");
+            if (filename)
+                handle_info(sock, filename, current_user);
+        }
+        else if (strcmp(command, "ADDACCESS") == 0) {
+            char* filename = strtok(NULL, ";\n");
+            char* user = strtok(NULL, ";\n");
+            char* perm = strtok(NULL, ";\n");
+            if (filename && user && perm) 
+                handle_add_access(sock, filename, user, perm, current_user);
+        }
+        else if (strcmp(command, "REMACCESS") == 0) {
+            char* filename = strtok(NULL, ";\n");
+            char* user = strtok(NULL, ";\n");
+            if (filename && user)
+                handle_rem_access(sock, filename, user, current_user);
+        }
+        else if (strcmp(command, "CREATE") == 0) {
+            char* filename = strtok(NULL, ";\n");
+            if (filename) handle_create(sock, filename, current_user);
+        }
+        else if (strcmp(command, "READ") == 0) {
+            char* filename = strtok(NULL, ";\n");
+            if (filename) handle_read(sock, filename, current_user);
+        }
+        else if (strcmp(command, "WRITE") == 0) {
+            char* filename = strtok(NULL, ";\n");
+            char* sent_num_str = strtok(NULL, ";\n");
+            if (filename && sent_num_str) {
+                handle_write(sock, filename, atoi(sent_num_str), current_user);
             }
         }
+        else if (strcmp(command, "DELETE") == 0) {
+            char* filename = strtok(NULL, ";\n");
+            if (filename)
+                handle_delete(sock, filename, current_user);
+        }
+        else if (strcmp(command, "STREAM") == 0) {
+            char* filename = strtok(NULL, ";\n");
+            if (filename)
+                handle_stream(sock, filename, current_user);
+        }
+        else if (strcmp(command, "UNDO") == 0)
+        {
+            char* filename = strtok(NULL, ";\n");
+            if (filename)
+                handle_undo(sock, filename, current_user);
+        }
+        else if (strcmp(command, "UPDATE_META") == 0)
+        {
+            char* filename = strtok(NULL, ";\n");
+            if(filename)
+                handle_update_meta(sock, filename);
+        }
+        else if (strcmp(command, "EXEC") == 0)
+        {
+            char* filename = strtok(NULL, ";\n");
+            if(filename)
+                handle_exec(sock, filename, current_user);
+        }
+        else {
+            char response[] = "ERROR: Unknown command.\n__END__\n";
+            send(sock, response, strlen(response), 0);
+        }
     }
+    
+    // Client disconnected
+    printf("[Name Server] Client '%s' disconnected.\n", current_user);
+    // TODO: You could add logic here to remove the user from the *active* user list
+    // but keep them in the *registered* list, per the Q&A.
+    
     free(client_info);
     close(sock);
     return NULL;
 }
+
 // --- HELPER FUNCTIONS FOR REGISTRATION ---
 
 void register_user(const char* username, const char* ip_addr) {
@@ -152,10 +209,10 @@ void register_user(const char* username, const char* ip_addr) {
 }
 
 
-void register_storage_server(const char* ip, int port) {
+// MODIFIED: Signature changed to accept file list
+void register_storage_server(const char* ip, int port, const char* file_list_str) {
     pthread_mutex_lock(&data_mutex);
     
-
     StorageServer* current = ss_list_head;
     while(current) {
         if(strcmp(current->ip_addr, ip) == 0 && current->port == port) {
@@ -174,12 +231,40 @@ void register_storage_server(const char* ip, int port) {
     ss_list_head = newSS;
     printf("[Data] Registered new SS at %s:%d\n", ip, port);
     
+    // MODIFIED: Parse the file list and add metadata
+    // This is a simple parser. A robust one would handle the "stream of packets" from Q&A
+    if (file_list_str && strlen(file_list_str) > 0) {
+        printf("[Data] Registering files from SS: %s\n", file_list_str);
+        char* files_copy = strdup(file_list_str);
+        char* filename = strtok(files_copy, ",");
+        while (filename) {
+            if (find_file(filename) == NULL) {
+                // File not known, add it. Assume "admin" owner? Or SS owner?
+                // For now, just add it with the SS.
+                FileMetadata* newFile = (FileMetadata*)malloc(sizeof(FileMetadata));
+                strcpy(newFile->filename, filename);
+                strcpy(newFile->owner, "ss_owner"); // Placeholder owner
+                newFile->word_count = 0; // Unknown
+                newFile->char_count = 0; // Unknown
+                newFile->last_access = time(NULL);
+                newFile->ss = newSS;
+                newFile->access_list = NULL; // No access list
+                newFile->next = file_list_head;
+                file_list_head = newFile;
+                printf("[Data] Registered existing file '%s' from SS.\n", filename);
+            }
+            filename = strtok(NULL, ",");
+        }
+        free(files_copy);
+    }
+
     pthread_mutex_unlock(&data_mutex);
 }
 
 
 void handle_list_users(int sock) {
-    char response[MAX_BUFFER_SIZE * 2] = ""; //bigger response buffer to account for longer responses
+    // (No change to this function's logic)
+    char response[MAX_BUFFER_SIZE * 2] = ""; 
     
     pthread_mutex_lock(&data_mutex);
     strcat(response, "Registered Users:\n");
@@ -196,33 +281,57 @@ void handle_list_users(int sock) {
 }
 
 void handle_view(int sock, const char* flags, const char* username) {
-    char response[MAX_BUFFER_SIZE * 4] = "";
+    char response[MAX_BUFFER_SIZE * 4] = ""; 
+    
+    // MODIFIED: Filled in the TODOs
     int show_details = (flags && (strstr(flags, "l") != NULL));
+    int show_all = (flags && (strstr(flags, "a") != NULL));
 
     pthread_mutex_lock(&data_mutex);
 
     if (show_details) {
-         snprintf(response, sizeof(response), "| %-20s | %-12s | %-17s |\n", "Filename", "Owner", "Location (SS)");
-         strcat(response, "---------------------------------------------------------\n");
+            snprintf(response, sizeof(response), "| %-20s | %-12s | %-17s |\n", "Filename", "Owner", "Location (SS)");
+            strcat(response, "---------------------------------------------------------\n");
     }
 
+    int file_count = 0;
     for (FileMetadata* current = file_list_head; current != NULL; current = current->next) {
+        
+        // MODIFIED: This is the permission check
+        // If show_all is false AND the user does NOT have permission, skip this file.
+        if (!show_all && !check_permission(current, username, 'R')) {
+            continue; 
+        }
+        
+        // If we are here, we have permission (or show_all is true)
+        file_count++;
         char line[256];
         if (show_details) {
             char loc[40] = "N/A";
             if (current->ss) {
-                 snprintf(loc, 40, "%s:%d", current->ss->ip_addr, current->ss->port);
+                    snprintf(loc, 40, "%s:%d", current->ss->ip_addr, current->ss->port);
             }
             snprintf(line, sizeof(line), "| %-20s | %-12s | %-17s |\n", 
-                current->filename, current->owner, loc);
+                    current->filename, current->owner, loc);
         } else {
             snprintf(line, sizeof(line), "%s\n", current->filename);
         }
+        
         // Prevent buffer overflow
         if (strlen(response) + strlen(line) < sizeof(response) - 100) {
             strcat(response, line);
         }
     }
+
+    // Add a footer if no files were found to show
+    if (file_count == 0) {
+        if (show_all) {
+            strcat(response, "No files found in the system.\n");
+        } else {
+            strcat(response, "No files accessible to you.\n");
+        }
+    }
+
     pthread_mutex_unlock(&data_mutex);
     
     strcat(response, "__END__\n");
@@ -230,58 +339,33 @@ void handle_view(int sock, const char* flags, const char* username) {
 }
 
 
-void handle_info(int sock, const char* filename) {
-    char response[1024];
-    snprintf(response, sizeof(response), "INFO for '%s' is not yet implemented.\n__END__\n", filename);
-    send(sock, response, strlen(response), 0);
-}
-
-void handle_add_access(int sock, const char* filename, const char* user, const char* perm) {
-    // TODO: Find the file, add user to its access_list.
-    char response[1024];
-    snprintf(response, sizeof(response), "ADDACCESS for '%s' is not yet implemented.\n__END__\n", filename);
-    send(sock, response, strlen(response), 0);
-}
-
-void handle_rem_access(int sock, const char* filename, const char* user) {
-     // TODO: Find the file, remove user from its access_list.
-    char response[1024];
-    snprintf(response, sizeof(response), "REMACCESS for '%s' is not yet implemented.\n__END__\n", filename);
-    send(sock, response, strlen(response), 0);
-}
-
-
 int main() {
+    // (No change to this function's logic)
     int server_sock, client_sock;
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_len = sizeof(client_addr);
 
     pthread_mutex_init(&data_mutex, NULL);
 
-    // 1. Create socket
     server_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (server_sock == -1) {
         perror("Could not create socket");
         return 1;
     }
 
-    // 2. Prepare the sockaddr_in structure
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(NAME_SERVER_PORT);
 
-    // 3. Bind
     if (bind(server_sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
         perror("Bind failed");
         return 1;
     }
     printf("[Name Server] Bind successful on port %d.\n", NAME_SERVER_PORT);
 
-    // 4. Listen
     listen(server_sock, 10);
     printf("[Name Server] Waiting for incoming connections...\n");
 
-    // 5. Accept and handle connections
     while ((client_sock = accept(server_sock, (struct sockaddr*)&client_addr, &client_len))) {
         printf("Connection accepted from %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
         
@@ -295,7 +379,6 @@ int main() {
             return 1;
         }
         
-        //to prevent leakage of resources
         pthread_detach(thread_id);
     }
 

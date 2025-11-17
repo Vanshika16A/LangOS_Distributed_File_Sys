@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <time.h>
 #include "CRWD.c" // CRWD.c is modified to include new helper functions
+#include "../logger.h"
 
 #define MAX_BUFFER_SIZE 1024
 #define NAME_SERVER_PORT 8080
@@ -36,6 +37,7 @@ void* handle_connection(void* client_info_p) {
     char* client_ip = inet_ntoa(client_info->client_addr.sin_addr);
     
     char buffer[MAX_BUFFER_SIZE];
+    char log_buf[MAX_BUFFER_SIZE + 200]; // Buffer for log messages
     int read_size;
     char current_user[50] = "anonymous"; // User for this session
 
@@ -50,7 +52,8 @@ void* handle_connection(void* client_info_p) {
             if (username) {
                 register_user(username, client_ip);
                 strcpy(current_user, username); // Set user for this session
-                printf("[Name Server] Registered user '%s' for session.\n", current_user);
+                snprintf(log_buf, sizeof(log_buf), "Registered client '%s' from IP %s", current_user, client_ip);
+                log_message(LOG_INFO, "NameServer", log_buf);
             }
             char response[] = "ACK_CLIENT_REG\n__END__\n";
             send(sock, response, strlen(response), 0);
@@ -93,10 +96,9 @@ void* handle_connection(void* client_info_p) {
         char* command = strtok(buffer, ";\n");
 
         if (command == NULL) continue;
-
-        printf("[Name Server] Received Command: %s from user: %s\n", command, current_user);
         
-        // REMOVED: The "anonymous" user check. User is now known.
+        snprintf(log_buf, sizeof(log_buf), "Request from user '%s' (IP: %s): %s", current_user, client_ip, command);
+        log_message(LOG_INFO, "NameServer", log_buf);
 
         if (strcmp(command, "LIST_USERS") == 0) {
             handle_list_users(sock);
@@ -173,9 +175,8 @@ void* handle_connection(void* client_info_p) {
     }
     
     // Client disconnected
-    printf("[Name Server] Client '%s' disconnected.\n", current_user);
-    // TODO: You could add logic here to remove the user from the *active* user list
-    // but keep them in the *registered* list, per the Q&A.
+    snprintf(log_buf, sizeof(log_buf), "Client '%s' (IP: %s) disconnected.", current_user, client_ip);
+    log_message(LOG_INFO, "NameServer", log_buf);
     
     free(client_info);
     close(sock);
@@ -346,7 +347,7 @@ int main() {
     socklen_t client_len = sizeof(client_addr);
 
     pthread_mutex_init(&data_mutex, NULL);
-
+    load_metadata();
     server_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (server_sock == -1) {
         perror("Could not create socket");
@@ -367,7 +368,9 @@ int main() {
     printf("[Name Server] Waiting for incoming connections...\n");
 
     while ((client_sock = accept(server_sock, (struct sockaddr*)&client_addr, &client_len))) {
-        printf("Connection accepted from %s:%d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+        char log_buf[100];
+        snprintf(log_buf, sizeof(log_buf), "Connection accepted from %s:%d", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+        log_message(LOG_INFO, "NameServer", log_buf);
         
         pthread_t thread_id;
         client_info_t* client_info = malloc(sizeof(client_info_t));

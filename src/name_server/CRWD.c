@@ -13,11 +13,14 @@
 #include <sys/socket.h>
 // ADDED: New includes for NS-to-SS communication
 #include <unistd.h>
-#include <arpa/inet.h> 
+#include <arpa/inet.h>
+#include "../error_codes.h" // MODIFIED INCLUDE
+#include "../logger.h"
 
 #define MAX_BUFFER_SIZE 1024
 #define SS_RESPONSE_LEN 4096 // For reading SS ACKs
-
+void save_metadata();
+void load_metadata();
 // Struct definitions (no change)
 typedef struct StorageServer {
     char ip_addr[20];
@@ -42,7 +45,7 @@ typedef struct FileMetadata {
     int word_count;
     int char_count;
     time_t last_access;
-    StorageServer* ss; 
+    StorageServer* ss;
     AccessNode* access_list;
     struct FileMetadata* next;
 } FileMetadata;
@@ -54,7 +57,7 @@ typedef struct User {
 } User;
 
 
-FileMetadata* file_list_head = NULL; 
+FileMetadata* file_list_head = NULL;
 StorageServer* ss_list_head = NULL;
 User* user_list_head = NULL;
 pthread_mutex_t data_mutex;
@@ -80,7 +83,7 @@ int check_permission(FileMetadata* file, const char* username, char perm) {
     while (current) {
         if (strcmp(current->username, username) == 0) {
             if (current->permission == 'W' || current->permission == perm) {
-                return 1; 
+                return 1;
             }
         }
         current = current->next;
@@ -106,7 +109,7 @@ int connect_and_send_to_ss(const char* ip, int port, const char* command, char* 
     ss_addr.sin_family = AF_INET;
     ss_addr.sin_port = htons(port);
 
-    if (connect(sock, (struct sockaddr*)&ss_addr, sizeof(ss_addr)) < 0) { 
+    if (connect(sock, (struct sockaddr*)&ss_addr, sizeof(ss_addr)) < 0) {
         perror("[NS] SS Connect failed");
         snprintf(response_buffer, SS_RESPONSE_LEN, "ERROR: NS could not connect to SS");
         close(sock);
@@ -172,7 +175,7 @@ void handle_info(int sock, const char* filename, const char* username) {
 
     // 1. Check if file exists
     if (!file) {
-        snprintf(response, sizeof(response), "ERROR: File '%s' not found.\n", filename);
+        snprintf(response, sizeof(response), "%s;%d;File '%s' not found.\n", ERROR_PREFIX, ERR_FILE_NOT_FOUND, filename);
         pthread_mutex_unlock(&data_mutex);
         strcat(response, "__END__\n");
         send(sock, response, strlen(response), 0);
@@ -181,7 +184,7 @@ void handle_info(int sock, const char* filename, const char* username) {
 
     // 2. Check for read permission
     if (!check_permission(file, username, 'R')) {
-        snprintf(response, sizeof(response), "ERROR: Permission denied for file '%s'.\n", filename);
+        snprintf(response, sizeof(response), "%s;%d;Permission denied for file '%s'.\n", ERROR_PREFIX, ERR_PERMISSION_DENIED, filename);
         pthread_mutex_unlock(&data_mutex);
         strcat(response, "__END__\n");
         send(sock, response, strlen(response), 0);
@@ -189,7 +192,7 @@ void handle_info(int sock, const char* filename, const char* username) {
     }
 
     // 3. File exists and user has permission, build the response
-    
+
     // Format the time
     char time_buf[100];
     strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", localtime(&file->last_access));
@@ -231,7 +234,7 @@ void handle_add_access(int sock, const char* filename, const char* target_user, 
 
     // 1. Check 1: Does the file exist?
     if (!file) {
-        snprintf(response, sizeof(response), "ERROR: File '%s' not found.\n__END__\n", filename);
+        snprintf(response, sizeof(response), "%s;%d;File '%s' not found.\n__END__\n", ERROR_PREFIX, ERR_FILE_NOT_FOUND, filename);
         pthread_mutex_unlock(&data_mutex);
         send(sock, response, strlen(response), 0);
         return;
@@ -239,7 +242,7 @@ void handle_add_access(int sock, const char* filename, const char* target_user, 
 
     // 2. Check 2: Is the current user the owner?
     if (strcmp(file->owner, current_user) != 0) {
-        snprintf(response, sizeof(response), "ERROR: Only the file owner ('%s') can change permissions.\n__END__\n", file->owner);
+        snprintf(response, sizeof(response), "%s;%d;Only the file owner ('%s') can change permissions.\n__END__\n", ERROR_PREFIX, ERR_PERMISSION_DENIED, file->owner);
         pthread_mutex_unlock(&data_mutex);
         send(sock, response, strlen(response), 0);
         return;
@@ -247,7 +250,7 @@ void handle_add_access(int sock, const char* filename, const char* target_user, 
 
     // 3. Check 3: Does the target user exist in the system? (Per Q&A)
     if (find_user(target_user) == NULL) {
-        snprintf(response, sizeof(response), "ERROR: User '%s' is not registered in the system.\n__END__\n", target_user);
+        snprintf(response, sizeof(response), "%s;%d;User '%s' is not registered in the system.\n__END__\n", ERROR_PREFIX, ERR_USER_NOT_FOUND, target_user);
         pthread_mutex_unlock(&data_mutex);
         send(sock, response, strlen(response), 0);
         return;
@@ -255,12 +258,12 @@ void handle_add_access(int sock, const char* filename, const char* target_user, 
 
     // 4. Check 4: Is the permission flag valid?
     if (perm[0] != 'R' && perm[0] != 'W') {
-         snprintf(response, sizeof(response), "ERROR: Invalid permission '%s'. Must be 'R' or 'W'.\n__END__\n", perm);
+         snprintf(response, sizeof(response), "%s;%d;Invalid permission '%s'. Must be 'R' or 'W'.\n__END__\n", ERROR_PREFIX, ERR_INVALID_INPUT, perm);
         pthread_mutex_unlock(&data_mutex);
         send(sock, response, strlen(response), 0);
         return;
     }
-    
+
     // 5. Logic: Find and update, or create new access node
     AccessNode* current = file->access_list;
     while(current) {
@@ -277,14 +280,14 @@ void handle_add_access(int sock, const char* filename, const char* target_user, 
         // User was not in the list, create a new node
         AccessNode* new_node = (AccessNode*)malloc(sizeof(AccessNode));
         if (!new_node) {
-             snprintf(response, sizeof(response), "ERROR: Name Server out of memory.\n__END__\n");
+             snprintf(response, sizeof(response), "%s;%d;Name Server out of memory.\n__END__\n", ERROR_PREFIX, ERR_SERVER_MISC);
              pthread_mutex_unlock(&data_mutex);
              send(sock, response, strlen(response), 0);
              return;
         }
         strcpy(new_node->username, target_user);
         new_node->permission = perm[0];
-        
+
         // Add to the head of the list
         new_node->next = file->access_list;
         file->access_list = new_node;
@@ -292,6 +295,7 @@ void handle_add_access(int sock, const char* filename, const char* target_user, 
 
     // 6. Send success response
     snprintf(response, sizeof(response), "Access for '%s' on '%s' set to '%c'.\n__END__\n", target_user, filename, perm[0]);
+    save_metadata();
     pthread_mutex_unlock(&data_mutex);
     send(sock, response, strlen(response), 0);
 }
@@ -309,7 +313,7 @@ void handle_rem_access(int sock, const char* filename, const char* target_user, 
 
     // 1. Check 1: Does the file exist?
     if (!file) {
-        snprintf(response, sizeof(response), "ERROR: File '%s' not found.\n__END__\n", filename);
+        snprintf(response, sizeof(response), "%s;%d;File '%s' not found.\n__END__\n", ERROR_PREFIX, ERR_FILE_NOT_FOUND, filename);
         pthread_mutex_unlock(&data_mutex);
         send(sock, response, strlen(response), 0);
         return;
@@ -317,7 +321,7 @@ void handle_rem_access(int sock, const char* filename, const char* target_user, 
 
     // 2. Check 2: Is the current user the owner?
     if (strcmp(file->owner, current_user) != 0) {
-        snprintf(response, sizeof(response), "ERROR: Only the file owner ('%s') can change permissions.\n__END__\n", file->owner);
+        snprintf(response, sizeof(response), "%s;%d;Only the file owner ('%s') can change permissions.\n__END__\n", ERROR_PREFIX, ERR_PERMISSION_DENIED, file->owner);
         pthread_mutex_unlock(&data_mutex);
         send(sock, response, strlen(response), 0);
         return;
@@ -352,7 +356,8 @@ void handle_rem_access(int sock, const char* filename, const char* target_user, 
     } else {
         snprintf(response, sizeof(response), "INFO: User '%s' had no special access on '%s' to remove.\n__END__\n", target_user, filename);
     }
-    
+    save_metadata();
+
     pthread_mutex_unlock(&data_mutex);
     send(sock, response, strlen(response), 0);
 }
@@ -367,20 +372,20 @@ void handle_create(int sock, const char* filename, const char* username) {
 
     if (find_file(filename)) {
         pthread_mutex_unlock(&data_mutex);
-        snprintf(response, sizeof(response), "ERROR: File '%s' already exists.\n__END__\n", filename);
+        snprintf(response, sizeof(response), "%s;%d;File '%s' already exists.\n__END__\n", ERROR_PREFIX, ERR_FILE_EXISTS, filename);
         send(sock, response, strlen(response), 0);
         return;
     }
-    
+
     if (!ss_list_head) {
         pthread_mutex_unlock(&data_mutex);
-        snprintf(response, sizeof(response), "ERROR: No Storage Servers available.\n__END__\n");
+        snprintf(response, sizeof(response), "%s;%d;No Storage Servers available.\n__END__\n", ERROR_PREFIX, ERR_NO_SS_AVAILABLE);
         send(sock, response, strlen(response), 0);
         return;
     }
 
     StorageServer* target_ss = ss_list_head; // Simple load balancing: just pick the first
-    
+
     // --- 1. Add metadata to NS first ---
     FileMetadata* newFile = (FileMetadata*)malloc(sizeof(FileMetadata));
     strcpy(newFile->filename, filename);
@@ -389,7 +394,7 @@ void handle_create(int sock, const char* filename, const char* username) {
     newFile->char_count = 0;
     newFile->last_access = time(NULL);
     newFile->ss = target_ss;
-    
+
     AccessNode* ownerAccess = (AccessNode*)malloc(sizeof(AccessNode));
     strcpy(ownerAccess->username, username);
     ownerAccess->permission = 'W';
@@ -398,14 +403,14 @@ void handle_create(int sock, const char* filename, const char* username) {
 
     newFile->next = file_list_head;
     file_list_head = newFile;
-    
+    save_metadata();
     // We are done with global lists, unlock
     pthread_mutex_unlock(&data_mutex);
 
     // --- 2. Forward request to SS ---
     printf("[NS] Forwarding CREATE request to SS at %s:%d\n", target_ss->ip_addr, target_ss->port);
     snprintf(ss_command, sizeof(ss_command), "SS_CREATE;%s\n", filename);
-    
+
     if (connect_and_send_to_ss(target_ss->ip_addr, target_ss->port, ss_command, ss_response)) {
         // SS responded
         if (strstr(ss_response, "ACK_CREATE")) {
@@ -413,13 +418,13 @@ void handle_create(int sock, const char* filename, const char* username) {
         } else {
             // SS failed. TODO: Roll back metadata creation?
             printf("[NS] SS Error for CREATE: %s\n", ss_response);
-            snprintf(response, sizeof(response), "ERROR: Storage Server failed: %.500s\n__END__\n", ss_response);
+            snprintf(response, sizeof(response), "%s;%d;Storage Server failed: %.500s\n__END__\n", ERROR_PREFIX, ERR_SS_FAILURE, ss_response);
             // For now, we leave the "zombie" metadata.
         }
     } else {
         // NS-SS connection failed. TODO: Roll back.
         printf("[NS] Failed to contact SS for CREATE.\n");
-        snprintf(response, sizeof(response), "ERROR: Name Server could not contact Storage Server.\n__END__\n");
+        snprintf(response, sizeof(response), "%s;%d;Name Server could not contact Storage Server.\n__END__\n", ERROR_PREFIX, ERR_SS_UNREACHABLE);
     }
 
     // --- 3. Send final ACK to client ---
@@ -430,12 +435,12 @@ void handle_create(int sock, const char* filename, const char* username) {
 void handle_read(int sock, const char* filename, const char* username) {
     char response[MAX_BUFFER_SIZE];
     pthread_mutex_lock(&data_mutex);
-    
+
     FileMetadata* file = find_file(filename);
-    
+
     if (!file) {
         pthread_mutex_unlock(&data_mutex);
-        snprintf(response, sizeof(response), "ERROR: File '%s' not found.\n__END__\n", filename);
+        snprintf(response, sizeof(response), "%s;%d;File '%s' not found.\n__END__\n", ERROR_PREFIX, ERR_FILE_NOT_FOUND, filename);
         send(sock, response, strlen(response), 0);
         return;
     }
@@ -443,7 +448,7 @@ void handle_read(int sock, const char* filename, const char* username) {
     // +++ ADDED: Permission Check +++
     if (!check_permission(file, username, 'R')) {
         pthread_mutex_unlock(&data_mutex);
-        snprintf(response, sizeof(response), "ERROR: Permission denied for file '%s'.\n__END__\n", filename);
+        snprintf(response, sizeof(response), "%s;%d;Permission denied for file '%s'.\n__END__\n", ERROR_PREFIX, ERR_PERMISSION_DENIED, filename);
         send(sock, response, strlen(response), 0);
         return;
     }
@@ -462,20 +467,20 @@ void handle_read(int sock, const char* filename, const char* username) {
 void handle_write(int sock, const char* filename, int sentence_num, const char* username) {
     char response[MAX_BUFFER_SIZE];
     pthread_mutex_lock(&data_mutex);
-    
+
     FileMetadata* file = find_file(filename);
-    
+
     if (!file) {
         pthread_mutex_unlock(&data_mutex);
-        snprintf(response, sizeof(response), "ERROR: File '%s' not found.\n__END__\n", filename);
+        snprintf(response, sizeof(response), "%s;%d;File '%s' not found.\n__END__\n", ERROR_PREFIX, ERR_FILE_NOT_FOUND, filename);
         send(sock, response, strlen(response), 0);
         return;
     }
-    
+
     // +++ ADDED: Permission Check (must have 'W' to write) +++
     if (!check_permission(file, username, 'W')) {
         pthread_mutex_unlock(&data_mutex);
-        snprintf(response, sizeof(response), "ERROR: Write permission denied for file '%s'.\n__END__\n", filename);
+        snprintf(response, sizeof(response), "%s;%d;Write permission denied for file '%s'.\n__END__\n", ERROR_PREFIX, ERR_PERMISSION_DENIED, filename);
         send(sock, response, strlen(response), 0);
         return;
     }
@@ -483,7 +488,7 @@ void handle_write(int sock, const char* filename, int sentence_num, const char* 
 
     StorageServer* target_ss = file->ss;
     pthread_mutex_unlock(&data_mutex);
-    
+
     printf("[NS] Redirecting client '%s' to SS at %s:%d for WRITE\n", username, target_ss->ip_addr, target_ss->port);
     snprintf(response, sizeof(response), "REDIRECT_WRITE;%s;%d;%s;%d\n__END__\n",
             target_ss->ip_addr, target_ss->port, filename, sentence_num);
@@ -497,25 +502,25 @@ void handle_delete(int sock, const char* filename, const char* username) {
     char ss_response[SS_RESPONSE_LEN];
 
     pthread_mutex_lock(&data_mutex);
-    
+
     FileMetadata* file = find_file(filename);
-    
+
     if (!file) {
         pthread_mutex_unlock(&data_mutex);
-        snprintf(response, sizeof(response), "ERROR: File '%s' not found.\n__END__\n", filename);
+        snprintf(response, sizeof(response), "%s;%d;File '%s' not found.\n__END__\n", ERROR_PREFIX, ERR_FILE_NOT_FOUND, filename);
         send(sock, response, strlen(response), 0);
         return;
     }
 
     if (strcmp(file->owner, username) != 0) {
         pthread_mutex_unlock(&data_mutex);
-        snprintf(response, sizeof(response), "ERROR: Only the owner can delete file '%s'.\n__END__\n", filename);
+        snprintf(response, sizeof(response), "%s;%d;Only the owner can delete file '%s'.\n__END__\n", ERROR_PREFIX, ERR_PERMISSION_DENIED, filename);
         send(sock, response, strlen(response), 0);
         return;
     }
 
     StorageServer* target_ss = file->ss;
-    
+
     // --- 1. Forward request to SS WHILE STILL HOLDING LOCK ---
     printf("[NS] Forwarding DELETE request to SS at %s:%d\n", target_ss->ip_addr, target_ss->port);
     snprintf(ss_command, sizeof(ss_command), "SS_DELETE;%s\n", filename);
@@ -534,7 +539,7 @@ void handle_delete(int sock, const char* filename, const char* username) {
                     } else {
                         file_list_head = current->next;
                     }
-                    
+
                     AccessNode* access = current->access_list;
                     while (access) {
                         AccessNode* temp = access;
@@ -543,6 +548,7 @@ void handle_delete(int sock, const char* filename, const char* username) {
                     }
                     free(current);
                     printf("[NS] Deleted metadata for '%s'\n", filename);
+                    save_metadata();
                     break;
                 }
                 prev = current;
@@ -553,14 +559,14 @@ void handle_delete(int sock, const char* filename, const char* username) {
         } else {
             // SS failed to delete, so we don't touch metadata
             printf("[NS] SS Error for DELETE: %s\n", ss_response);
-            snprintf(response, sizeof(response), "ERROR: Storage Server failed: %.500s\n__END__\n", ss_response);
+            snprintf(response, sizeof(response), "%s;%d;Storage Server failed: %.500s\n__END__\n", ERROR_PREFIX, ERR_SS_FAILURE, ss_response);
         }
     } else {
         // NS-SS connection failed. Do not delete metadata.
         printf("[NS] Failed to contact SS for DELETE.\n");
-        snprintf(response, sizeof(response), "ERROR: Name Server could not contact Storage Server.\n__END__\n");
+        snprintf(response, sizeof(response), "%s;%d;Name Server could not contact Storage Server.\n__END__\n", ERROR_PREFIX, ERR_SS_UNREACHABLE);
     }
-    
+
     // --- 3. Unlock mutex and send final response to client ---
     pthread_mutex_unlock(&data_mutex);
     send(sock, response, strlen(response), 0);
@@ -569,19 +575,19 @@ void handle_delete(int sock, const char* filename, const char* username) {
 void handle_stream(int sock, const char* filename, const char* username) {
     char response[MAX_BUFFER_SIZE];
     pthread_mutex_lock(&data_mutex);
-    
+
     FileMetadata* file = find_file(filename);
-    
+
     if (!file) {
         pthread_mutex_unlock(&data_mutex);
-        snprintf(response, sizeof(response), "ERROR: File '%s' not found.\n__END__\n", filename);
+        snprintf(response, sizeof(response), "%s;%d;File '%s' not found.\n__END__\n", ERROR_PREFIX, ERR_FILE_NOT_FOUND, filename);
         send(sock, response, strlen(response), 0);
         return;
     }
 
     if (!check_permission(file, username, 'R')) {
         pthread_mutex_unlock(&data_mutex);
-        snprintf(response, sizeof(response), "ERROR: Permission denied for file '%s'.\n__END__\n", filename);
+        snprintf(response, sizeof(response), "%s;%d;Permission denied for file '%s'.\n__END__\n", ERROR_PREFIX, ERR_PERMISSION_DENIED, filename);
         send(sock, response, strlen(response), 0);
         return;
     }
@@ -609,7 +615,7 @@ void handle_undo(int sock, const char* filename, const char* current_user)
     FileMetadata* file = find_file(filename);
 
     if (!file) {
-        snprintf(response, sizeof(response), "ERROR: File '%s' not found.\n__END__\n", filename);
+        snprintf(response, sizeof(response), "%s;%d;File '%s' not found.\n__END__\n", ERROR_PREFIX, ERR_FILE_NOT_FOUND, filename);
         pthread_mutex_unlock(&data_mutex);
         send(sock, response, strlen(response), 0);
         return;
@@ -618,14 +624,14 @@ void handle_undo(int sock, const char* filename, const char* current_user)
     // 1. Check Permission (as per Q&A)
     //    (Fixing bug: must pass 'file' object, not 'filename' string)
     if (!check_permission(file, current_user, 'W')) {
-        snprintf(response, sizeof(response), "ERROR: Write permission required to undo '%s'.\n__END__\n", filename);
+        snprintf(response, sizeof(response), "%s;%d;Write permission required to undo '%s'.\n__END__\n", ERROR_PREFIX, ERR_PERMISSION_DENIED, filename);
         pthread_mutex_unlock(&data_mutex);
         send(sock, response, strlen(response), 0);
         return;
     }
 
     StorageServer* target_ss = file->ss;
-    
+
     // We are done with metadata, unlock
     pthread_mutex_unlock(&data_mutex);
 
@@ -639,11 +645,11 @@ void handle_undo(int sock, const char* filename, const char* current_user)
             snprintf(response, sizeof(response), "Undo successful for '%s'.\n__END__\n", filename);
         } else {
             // SS failed (e.g., no .bak file)
-            snprintf(response, sizeof(response), "ERROR: Undo failed on Storage Server: %.500s\n__END__\n", ss_response);
+            snprintf(response, sizeof(response), "%s;%d;Undo failed on Storage Server: %.500s\n__END__\n", ERROR_PREFIX, ERR_SS_FAILURE, ss_response);
         }
     } else {
         // NS-SS connection failed
-        snprintf(response, sizeof(response), "ERROR: Name Server could not contact Storage Server for undo.\n__END__\n");
+        snprintf(response, sizeof(response), "%s;%d;Name Server could not contact Storage Server for undo.\n__END__\n", ERROR_PREFIX, ERR_SS_UNREACHABLE);
     }
 
     // 3. Send final ACK to client
@@ -682,7 +688,7 @@ void handle_update_meta(int sock, const char* filename)
     // Note: strlen is the correct char count. (Your 'strlen - 1' was a bug)
     int char_count = strlen(file_content);
     int word_count = 0;
-    
+
     // We must strdup because strtok modifies the string
     char* content_copy = strdup(file_content);
     if (!content_copy) return; // Out of memory
@@ -724,14 +730,14 @@ void handle_exec(int sock, const char* filename, const char* current_user)
 
     // 1. Check permissions
     if (!file) {
-        snprintf(response, sizeof(response), "ERROR: File '%s' not found.\n__END__\n", filename);
+        snprintf(response, sizeof(response), "%s;%d;File '%s' not found.\n__END__\n", ERROR_PREFIX, ERR_FILE_NOT_FOUND, filename);
         pthread_mutex_unlock(&data_mutex);
         send(sock, response, strlen(response), 0);
         return;
     }
 
     if (!check_permission(file, current_user, 'R')) {
-        snprintf(response, sizeof(response), "ERROR: Read permission denied for file '%s'.\n__END__\n", filename);
+        snprintf(response, sizeof(response), "%s;%d;Read permission denied for file '%s'.\n__END__\n", ERROR_PREFIX, ERR_PERMISSION_DENIED, filename);
         pthread_mutex_unlock(&data_mutex);
         send(sock, response, strlen(response), 0);
         return;
@@ -741,13 +747,13 @@ void handle_exec(int sock, const char* filename, const char* current_user)
     target_ss = file->ss;
     strcpy(ss_ip, target_ss->ip_addr);
     ss_port = target_ss->port;
-    
+
     pthread_mutex_unlock(&data_mutex);
 
     // 2. NS acts as a client to get the file from SS
     snprintf(ss_command, sizeof(ss_command), "SS_READ;%s\n", filename);
     if (!connect_and_send_to_ss(ss_ip, ss_port, ss_command, file_content)) {
-        snprintf(response, sizeof(response), "ERROR: NS failed to fetch file from SS.\n__END__\n");
+        snprintf(response, sizeof(response), "%s;%d;NS failed to fetch file from SS.\n__END__\n", ERROR_PREFIX, ERR_SS_UNREACHABLE);
         send(sock, response, strlen(response), 0);
         return;
     }
@@ -756,7 +762,7 @@ void handle_exec(int sock, const char* filename, const char* current_user)
     char tmp_filename[] = "/tmp/docs_exec.XXXXXX";
     int tmp_fd = mkstemp(tmp_filename);
     if (tmp_fd == -1) {
-        snprintf(response, sizeof(response), "ERROR: NS failed to create temp file for execution.\n__END__\n");
+        snprintf(response, sizeof(response), "%s;%d;NS failed to create temp file for execution.\n__END__\n", ERROR_PREFIX, ERR_SERVER_MISC);
         send(sock, response, strlen(response), 0);
         return;
     }
@@ -766,7 +772,7 @@ void handle_exec(int sock, const char* filename, const char* current_user)
     // 4. Fork, execute, and capture output
     int pipe_fd[2];
     if (pipe(pipe_fd) == -1) {
-        snprintf(response, sizeof(response), "ERROR: NS failed to create pipe.\n__END__\n");
+        snprintf(response, sizeof(response), "%s;%d;NS failed to create pipe.\n__END__\n", ERROR_PREFIX, ERR_SERVER_MISC);
         send(sock, response, strlen(response), 0);
         remove(tmp_filename);
         return;
@@ -774,7 +780,7 @@ void handle_exec(int sock, const char* filename, const char* current_user)
 
     pid_t pid = fork();
     if (pid == -1) {
-        snprintf(response, sizeof(response), "ERROR: NS failed to fork.\n__END__\n");
+        snprintf(response, sizeof(response), "%s;%d;NS failed to fork.\n__END__\n", ERROR_PREFIX, ERR_SERVER_MISC);
         send(sock, response, strlen(response), 0);
         remove(tmp_filename);
         return;
@@ -788,7 +794,7 @@ void handle_exec(int sock, const char* filename, const char* current_user)
 
         // Execute the script
         execlp("bash", "bash", tmp_filename, NULL);
-        
+
         // If execlp fails
         perror("execlp failed");
         exit(1);
@@ -805,7 +811,7 @@ void handle_exec(int sock, const char* filename, const char* current_user)
             total_read += read_size;
         }
         output_buffer[total_read] = '\0';
-        
+
         wait(NULL); // Wait for the child to terminate
         close(pipe_fd[0]);
         remove(tmp_filename); // Clean up the temp file
@@ -814,4 +820,127 @@ void handle_exec(int sock, const char* filename, const char* current_user)
         strncat(output_buffer, "\n__END__\n", sizeof(output_buffer) - strlen(output_buffer) - 1);
         send(sock, output_buffer, strlen(output_buffer), 0);
     }
+}
+void save_metadata() {
+    // Note: This function assumes the data_mutex is already locked by the caller.
+    
+    // 1. Save Users
+    FILE* user_file = fopen("user_data.dat", "w");
+    if (!user_file) {
+        log_message(LOG_ERROR, "Persistence", "Failed to open user_data.dat for writing.");
+        return;
+    }
+    for (User* current = user_list_head; current != NULL; current = current->next) {
+        fprintf(user_file, "%s\n", current->username);
+    }
+    fclose(user_file);
+
+    // 2. Save File Metadata
+    FILE* meta_file = fopen("file_metadata.dat", "w");
+    if (!meta_file) {
+        log_message(LOG_ERROR, "Persistence", "Failed to open file_metadata.dat for writing.");
+        return;
+    }
+    for (FileMetadata* current = file_list_head; current != NULL; current = current->next) {
+        // Format: filename;owner;ss_ip;ss_port
+        fprintf(meta_file, "%s;%s;%s;%d", current->filename, current->owner, current->ss->ip_addr, current->ss->port);
+        
+        // Append access list: ;user1,R;user2,W
+        for (AccessNode* acc = current->access_list; acc != NULL; acc = acc->next) {
+            // We don't need to save the owner's permission, it's implicit
+            if (strcmp(acc->username, current->owner) != 0) {
+                 fprintf(meta_file, ";%s,%c", acc->username, acc->permission);
+            }
+        }
+        fprintf(meta_file, "\n");
+    }
+    fclose(meta_file);
+    log_message(LOG_DEBUG, "Persistence", "Metadata saved to disk.");
+}
+
+// Loads all user and file metadata from disk on startup.
+void load_metadata() {
+    pthread_mutex_lock(&data_mutex);
+    
+    char line_buffer[MAX_BUFFER_SIZE * 2];
+
+    // 1. Load Users
+    FILE* user_file = fopen("user_data.dat", "r");
+    if (user_file) {
+        while (fgets(line_buffer, sizeof(line_buffer), user_file)) {
+            line_buffer[strcspn(line_buffer, "\n")] = 0; // Remove newline
+            if (strlen(line_buffer) > 0) {
+                User* newUser = (User*)malloc(sizeof(User));
+                strcpy(newUser->username, line_buffer);
+                strcpy(newUser->ip_addr, "0.0.0.0"); // IP will be updated on re-register
+                newUser->next = user_list_head;
+                user_list_head = newUser;
+            }
+        }
+        fclose(user_file);
+        log_message(LOG_INFO, "Persistence", "Loaded user data from disk.");
+    }
+
+    // 2. Load File Metadata
+    FILE* meta_file = fopen("file_metadata.dat", "r");
+    if (meta_file) {
+        while (fgets(line_buffer, sizeof(line_buffer), meta_file)) {
+            line_buffer[strcspn(line_buffer, "\n")] = 0;
+            
+            char* filename = strtok(line_buffer, ";");
+            char* owner = strtok(NULL, ";");
+            char* ss_ip = strtok(NULL, ";");
+            char* ss_port_str = strtok(NULL, ";");
+
+            if (!filename || !owner || !ss_ip || !ss_port_str) continue;
+
+            // Find the storage server (must have registered before loading)
+            StorageServer* ss = ss_list_head;
+            while(ss) {
+                if (strcmp(ss->ip_addr, ss_ip) == 0 && ss->port == atoi(ss_port_str)) break;
+                ss = ss->next;
+            }
+            if (!ss) {
+                // This can happen if an SS hasn't re-registered yet. We skip the file.
+                // A more robust system might hold this metadata pending SS registration.
+                continue;
+            }
+
+            FileMetadata* newFile = (FileMetadata*)malloc(sizeof(FileMetadata));
+            strcpy(newFile->filename, filename);
+            strcpy(newFile->owner, owner);
+            newFile->ss = ss; // Link to the found SS
+            newFile->word_count = 0; // Will be updated
+            newFile->char_count = 0; // Will be updated
+            newFile->last_access = time(NULL);
+            newFile->access_list = NULL;
+
+            // Add owner to access list implicitly
+            AccessNode* ownerAccess = (AccessNode*)malloc(sizeof(AccessNode));
+            strcpy(ownerAccess->username, owner);
+            ownerAccess->permission = 'W';
+            ownerAccess->next = NULL;
+            newFile->access_list = ownerAccess;
+
+            // Parse and add other users to access list
+            char* access_token;
+            while ((access_token = strtok(NULL, ";"))) {
+                char* user = strtok(access_token, ",");
+                char* perm = strtok(NULL, ",");
+                if (user && perm) {
+                    AccessNode* newAccess = (AccessNode*)malloc(sizeof(AccessNode));
+                    strcpy(newAccess->username, user);
+                    newAccess->permission = perm[0];
+                    newAccess->next = newFile->access_list;
+                    newFile->access_list = newAccess;
+                }
+            }
+
+            newFile->next = file_list_head;
+            file_list_head = newFile;
+        }
+        fclose(meta_file);
+        log_message(LOG_INFO, "Persistence", "Loaded file metadata from disk.");
+    }
+    pthread_mutex_unlock(&data_mutex);
 }

@@ -8,7 +8,7 @@
 #define NAME_SERVER_IP "127.0.0.1"
 #define NAME_SERVER_PORT 8080
 #define MAX_USERNAME_LEN 1024
-#define MAX_RESPONSE_LEN 4096
+#define MAX_RESPONSE_LEN 8192
 
 // connection to the storage server (no change)
 int connect_to_ss(const char* ip, int port) { 

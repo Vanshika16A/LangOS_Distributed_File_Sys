@@ -1,3 +1,15 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <strings.h> // For strcasecmp
+
+#define NAME_SERVER_IP "127.0.0.1"
+#define NAME_SERVER_PORT 8080
+
+
 void handle_ns_command(const char* command_str);
 #include "client_SS_helper_functions.c"
 
@@ -38,19 +50,30 @@ void handle_ns_command(const char* command_str) {
     }
 
     // --- 3. Process the response ---
-    // Note: This assumes one response per command.
-    // A robust system might handle multiple messages in the buffer.
     char* end_token = strstr(server_reply, "__END__");
     if (end_token != NULL) {
         *end_token = '\0';
     }
     
+    char* response_type = strtok(server_reply, ";\n");
+    if (response_type == NULL) return; // Empty response
+
     char* ip, *port_str, *filename, *sent_num_str;
-    
-    // REMOVED: REDIRECT_CREATE (now handled by NS)
-    
-    if (strncmp(server_reply, "REDIRECT_READ", 13) == 0) {
-        strtok(server_reply, ";");
+
+    if (strcmp(response_type, "ERROR") == 0) {
+        // This is a new standardized error message
+        char* error_code_str = strtok(NULL, ";");
+        char* error_message = strtok(NULL, "\n"); // Get the rest
+        if (error_code_str && error_message) {
+            printf("Error [%s]: %s\n", error_code_str, error_message);
+        } else {
+            // This handles cases where the error from the server might not be formatted correctly
+            // or for older, non-standardized error messages.
+            printf("%s\n", response_type);
+        }
+    }
+    else if (strcmp(response_type, "REDIRECT_READ") == 0) {
+        // strtok was already called, so we start with NULL
         ip = strtok(NULL, ";");
         port_str = strtok(NULL, ";");
         filename = strtok(NULL, ";\n");
@@ -58,8 +81,7 @@ void handle_ns_command(const char* command_str) {
             handle_ss_read(ip, atoi(port_str), filename);
         }
     }
-    else if (strncmp(server_reply, "REDIRECT_WRITE", 14) == 0) {
-        strtok(server_reply, ";");
+    else if (strcmp(response_type, "REDIRECT_WRITE") == 0) {
         ip = strtok(NULL, ";");
         port_str = strtok(NULL, ";");
         filename = strtok(NULL, ";\n");
@@ -68,8 +90,7 @@ void handle_ns_command(const char* command_str) {
             handle_ss_write_session(ip, atoi(port_str), filename, atoi(sent_num_str));
         }
     }
-    else if (strncmp(server_reply, "REDIRECT_STREAM", 13) == 0) {
-        strtok(server_reply, ";");
+    else if (strcmp(response_type, "REDIRECT_STREAM") == 0) {
         ip = strtok(NULL, ";");
         port_str = strtok(NULL, ";");
         filename = strtok(NULL, ";\n");
@@ -77,13 +98,10 @@ void handle_ns_command(const char* command_str) {
             handle_ss_stream(ip, atoi(port_str), filename);
         }
     }
-    // REMOVED: REDIRECT_DELETE (now handled by NS)
-    // REMOVED: The recursive call to NS_comms("DELETE_METADATA...")
-    
     else {
-        // Not a redirect, just a simple message from NS
-        // (e.g., "File created," "File deleted," "ERROR: ...")
-        printf("%s\n", server_reply);
+        // Not a redirect or a standard error, just a simple message
+        // The first token is the message itself.
+        printf("%s\n", response_type);
     }
 }
 

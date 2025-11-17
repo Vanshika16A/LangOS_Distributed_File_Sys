@@ -10,16 +10,18 @@
 #include <errno.h>
 // ADDED: For scanning directory
 #include <dirent.h>
+// At the top of storage_server.c, add this include
+#include "../logger.h"
 
 #define NAME_SERVER_IP "127.0.0.1"
 #define NAME_SERVER_PORT 8080
 
 // This SS's details
 #define SS_IP "127.0.0.1"
-#define SS_PORT 9001 
+#define SS_PORT 9001
 // MODIFIED: This port must now accept connections from BOTH
 // clients (for READ/WRITE) and the NS (for CREATE/DELETE).
-#define SS_ROOT_DIR "ss_files" 
+#define SS_ROOT_DIR "ss_files"
 
 #define MAX_BUFFER 2048
 #define MAX_SENTENCE_LEN 1024
@@ -32,7 +34,7 @@ typedef struct {
     int conn_socket; // MODIFIED: Renamed for clarity
 } connection_t;
 
-// ... (WriteOp struct, file_system_mutex, get_safe_path, 
+// ... (WriteOp struct, file_system_mutex, get_safe_path,
 //    get_nth_sentence, commit_changes are all unchanged) ...
 typedef struct WriteOp {
     int word_index;
@@ -53,16 +55,16 @@ char* get_nth_sentence(char* content, int n, char** end_ptr) {
     char* start = content;
     for (int i = 0; i < n; i++) {
         start = strpbrk(start, ".?!");
-        if (!start) return NULL; 
-        start++; 
+        if (!start) return NULL;
+        start++;
         while (*start == ' ' || *start == '\n' || *start == '\t' || *start == '\r') {
             start++;
         }
     }
-    
+
     *end_ptr = strpbrk(start, ".?!");
     if (*end_ptr) {
-        (*end_ptr)++; 
+        (*end_ptr)++;
     }
     return start;
 }
@@ -96,10 +98,10 @@ void commit_changes(const char* filename, int sentence_num, WriteOp* write_head)
         file_content[f_size] = '\0';
         fclose(f_read); // f_read is now our flag for "did file exist before?"
     }
-    
+
     char* sentence_end = NULL;
     char* sentence_start = get_nth_sentence(file_content, sentence_num, &sentence_end);
-    
+
     // --- FIX 2: Handle Sentence 0 on an Empty File ---
     if (!sentence_start) {
         if (sentence_num == 0) {
@@ -119,11 +121,11 @@ void commit_changes(const char* filename, int sentence_num, WriteOp* write_head)
         sentence_len = strlen(sentence_start);
     }
     char* sentence = strndup(sentence_start, sentence_len);
-    
+
     // --- FIX 3: Make 'words' array larger to handle new words ---
     char* words[MAX_WORDS * 2]; // Give space for appends
     int word_count = 0;
-    
+
     if (strlen(sentence) > 0) { // Only tokenize if sentence isn't empty
         char* word = strtok(sentence, " \t\n\r");
         while(word && word_count < (MAX_WORDS * 2)) {
@@ -131,7 +133,7 @@ void commit_changes(const char* filename, int sentence_num, WriteOp* write_head)
             word = strtok(NULL, " \t\n\r");
         }
     }
-    
+
     // --- FIX 4: Corrected WriteOp logic to handle appends ---
     WriteOp* current_op = write_head;
     while(current_op) {
@@ -139,7 +141,7 @@ void commit_changes(const char* filename, int sentence_num, WriteOp* write_head)
             // Case 1: Modify existing word
             free(words[current_op->word_index]);
             words[current_op->word_index] = strdup(current_op->content);
-        } 
+        }
         else if (current_op->word_index == word_count && word_count < (MAX_WORDS * 2)) {
             // Case 2: Append new word to the end
             words[word_count++] = strdup(current_op->content);
@@ -164,7 +166,7 @@ void commit_changes(const char* filename, int sentence_num, WriteOp* write_head)
     char tmp_filepath[260];
     snprintf(tmp_filepath, sizeof(tmp_filepath), "%s.tmp", filepath);
     FILE* f_write = fopen(tmp_filepath, "w");
-    
+
     long before_len = sentence_start - file_content;
     fwrite(file_content, 1, before_len, f_write);
     fwrite(new_sentence, 1, strlen(new_sentence), f_write);
@@ -172,13 +174,13 @@ void commit_changes(const char* filename, int sentence_num, WriteOp* write_head)
     if (sentence_end) {
         fwrite(sentence_end, 1, strlen(sentence_end), f_write);
     }
-    
+
     fclose(f_write);
-    
+
     // --- FIX 5: Only create backup if file existed before ---
     if (f_read != NULL) { // f_read is NULL if file was new
         if (rename(filepath, backup_path) != 0) {
-            if(errno != ENOENT) { 
+            if(errno != ENOENT) {
                 perror("[SS] Failed to create backup file");
             }
         }
@@ -194,7 +196,7 @@ void commit_changes(const char* filename, int sentence_num, WriteOp* write_head)
     free(file_content);
     free(sentence);
     for (int i = 0; i < word_count; i++) free(words[i]);
-    
+
     pthread_mutex_unlock(&file_system_mutex);
 }
 
@@ -245,7 +247,7 @@ void register_with_name_server() {
     }
 
     printf("[Storage Server] Connected to Name Server.\n");
-    
+
     // MODIFIED: Send IP, Port, and File List
     // Format: REGISTER_SS;ip;port;file1.txt,file2.txt\n
     snprintf(message, sizeof(message), "REGISTER_SS;%s;%d;%s\n", SS_IP, SS_PORT, file_list);
@@ -267,14 +269,10 @@ void* handle_ss_connection(void* arg) {
     connection_t* conn = (connection_t*)arg;
     int sock = conn->conn_socket; // Get socket from struct
     free(conn);
-    
+
     char buffer[MAX_BUFFER];
     int read_size;
-    
-    // (No change to the rest of this function's logic)
-    // It already handles SS_CREATE, SS_DELETE, SS_READ, and the WRITE session
-    // This function will now be called by connections from
-    // EITHER a Client (for READ/WRITE) OR the NS (for CREATE/DELETE).
+    char log_buf[MAX_BUFFER + 100];
 
     WriteOp* write_head = NULL;
     int locked_sentence_num = -1;
@@ -289,14 +287,15 @@ void* handle_ss_connection(void* arg) {
             continue;
         }
 
-        printf("[SS] Received Command: %s\n", command_copy);
+        snprintf(log_buf, sizeof(log_buf), "Received command: %s", command_copy);
+        log_message(LOG_INFO, "StorageServer", log_buf);
         free(command_copy);
 
         if (strcmp(command, "SS_CREATE") == 0) {
             char* filename = strtok(NULL, ";\n");
             char filepath[256];
             get_safe_path(filename, filepath);
-            
+
             if (filepath[0]) {
                 int fd = open(filepath, O_WRONLY | O_CREAT | O_EXCL, 0644);
                 if (fd == -1) {
@@ -306,12 +305,12 @@ void* handle_ss_connection(void* arg) {
                     send(sock, "ACK_CREATE\n__SS_END__\n", 21, 0);
                 }
             }
-        } 
+        }
         else if (strcmp(command, "SS_READ") == 0) {
             char* filename = strtok(NULL, ";\n");
             char filepath[256];
             get_safe_path(filename, filepath);
-            
+
             FILE* f = fopen(filepath, "r");
             if (!f) {
                 send(sock, "ERROR: File not found\n__SS_END__\n", 30, 0);
@@ -329,7 +328,7 @@ void* handle_ss_connection(void* arg) {
             char* filename = strtok(NULL, ";\n");
             char filepath[256];
             get_safe_path(filename, filepath);
-            
+
             FILE* f = fopen(filepath, "r");
             if (!f) {
                 send(sock, "ERROR: File not found\n__SS_END__\n", 30, 0);
@@ -347,7 +346,7 @@ void* handle_ss_connection(void* arg) {
             char* filename = strtok(NULL, ";\n");
             char filepath[256];
             get_safe_path(filename, filepath);
-            
+
             if (remove(filepath) == 0) {
                 send(sock, "ACK_DELETE\n__SS_END__\n", 21, 0);
             } else {
@@ -357,31 +356,31 @@ void* handle_ss_connection(void* arg) {
         else if (strcmp(command, "SS_LOCK_SENTENCE") == 0) {
             char* filename = strtok(NULL, ";\n");
             char* sent_num_str = strtok(NULL, ";\n");
-            
+
             // TODO: Implement actual per-sentence locking
-            
+
             strcpy(locked_filename, filename);
             locked_sentence_num = atoi(sent_num_str);
             printf("[SS] File '%s' sentence %d locked (demo lock)\n", locked_filename, locked_sentence_num);
-            send(sock, "ACK_LOCK\n", 9, 0); 
+            send(sock, "ACK_LOCK\n", 9, 0);
         }
         else if (strcmp(command, "WRITE_DATA") == 0) {
             int word_idx = atoi(strtok(NULL, ";\n"));
             char* content = strtok(NULL, ";\n");
-            
+
             WriteOp* new_op = (WriteOp*)malloc(sizeof(WriteOp));
             new_op->word_index = word_idx;
             strcpy(new_op->content, content);
             new_op->next = write_head;
             write_head = new_op;
-            
+
             printf("[SS] Buffered write: idx %d, content '%s'\n", word_idx, content);
-            send(sock, "ACK_DATA\n", 9, 0); 
+            send(sock, "ACK_DATA\n", 9, 0);
         }
         else if (strcmp(command, "COMMIT_WRITE") == 0) {
             printf("[SS] Committing changes to '%s', sentence %d\n", locked_filename, locked_sentence_num);
             commit_changes(locked_filename, locked_sentence_num, write_head);
-            
+
             while(write_head) {
                 WriteOp* temp = write_head;
                 write_head = write_head->next;
@@ -389,14 +388,14 @@ void* handle_ss_connection(void* arg) {
             }
             locked_sentence_num = -1;
             locked_filename[0] = '\0';
-            
-            send(sock, "ACK_COMMIT\n__SS_END__\n", 21, 0); 
+
+            send(sock, "ACK_COMMIT\n__SS_END__\n", 21, 0);
         }
         else if (strcmp(command, "SS_UNDO") == 0) {
             char* filename = strtok(NULL, ";\n");
             char filepath[256];
             char backup_path[256];
-            
+
             get_safe_path(filename, filepath);
             snprintf(backup_path, sizeof(backup_path), "%s.bak", filepath);
 
@@ -410,13 +409,13 @@ void* handle_ss_connection(void* arg) {
             }
         }
     }
-    
+
     while(write_head) {
         WriteOp* temp = write_head;
         write_head = write_head->next;
         free(temp);
     }
-    printf("[SS] Connection closed.\n");
+    log_message(LOG_INFO, "StorageServer", "Connection closed.");
     close(sock);
     return NULL;
 }
@@ -424,7 +423,7 @@ void* handle_ss_connection(void* arg) {
 
 int main() {
     mkdir(SS_ROOT_DIR, 0755);
-    
+
     register_with_name_server();
 
     int server_sock, new_conn_sock; // MODIFIED: Renamed
@@ -445,15 +444,19 @@ int main() {
         perror("SS Bind failed");
         return 1;
     }
-    printf("[Storage Server] Bind successful on port %d.\n", SS_PORT);
+
+    char log_buf[100];
+    snprintf(log_buf, sizeof(log_buf), "Bind successful on port %d.", SS_PORT);
+    log_message(LOG_INFO, "StorageServer", log_buf);
 
     listen(server_sock, 10);
     printf("[Storage Server] Waiting for connections (from Clients or NS)...\n");
 
     // MODIFIED: Renamed variables
     while ((new_conn_sock = accept(server_sock, (struct sockaddr*)&conn_addr, &conn_len))) {
-        printf("[SS] Connection accepted from %s:%d\n", inet_ntoa(conn_addr.sin_addr), ntohs(conn_addr.sin_port));
-        
+        snprintf(log_buf, sizeof(log_buf), "Connection accepted from %s:%d", inet_ntoa(conn_addr.sin_addr), ntohs(conn_addr.sin_port));
+        log_message(LOG_INFO, "StorageServer", log_buf);
+
         pthread_t thread_id;
         connection_t* conn = (connection_t*)malloc(sizeof(connection_t));
         conn->conn_socket = new_conn_sock; // Use new socket

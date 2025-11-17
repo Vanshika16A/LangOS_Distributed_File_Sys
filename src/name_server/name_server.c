@@ -9,6 +9,8 @@
 #include <time.h>
 #include "CRWD.c" // CRWD.c is modified to include new helper functions
 #include "../logger.h"
+#include "hash_table.h"
+
 
 #define MAX_BUFFER_SIZE 1024
 #define NAME_SERVER_PORT 8080
@@ -28,7 +30,7 @@ void handle_view(int sock, const char* flags, const char* username);
 void handle_info(int sock, const char* filename, const char* username);
 void handle_add_access(int sock, const char* filename, const char* target_user, const char* perm, const char* current_user);
 void handle_rem_access(int sock, const char* filename, const char* target_user, const char* current_user);
-
+void lru_int();
 
 // MODIFIED: This function now handles a persistent session
 void* handle_connection(void* client_info_p) {
@@ -93,6 +95,8 @@ void* handle_connection(void* client_info_p) {
     // --- 2. Handle Command Loop for Registered Client ---
     while ((read_size = recv(sock, buffer, MAX_BUFFER_SIZE - 1, 0)) > 0) {
         buffer[read_size] = '\0';
+        char command_line[MAX_BUFFER_SIZE];
+        strncpy(command_line, buffer, MAX_BUFFER_SIZE);
         char* command = strtok(buffer, ";\n");
 
         if (command == NULL) continue;
@@ -116,8 +120,18 @@ void* handle_connection(void* client_info_p) {
             char* filename = strtok(NULL, ";\n");
             char* user = strtok(NULL, ";\n");
             char* perm = strtok(NULL, ";\n");
-            if (filename && user && perm) 
-                handle_add_access(sock, filename, user, perm, current_user);
+            if (filename && user && perm) {
+            char filename_copy[100];
+            char user_copy[50];
+            char perm_copy[2];
+            strncpy(filename_copy, filename, 99);
+            filename_copy[99] = '\0';
+            strncpy(user_copy, user, 49);
+            user_copy[49] = '\0';
+            strncpy(perm_copy, perm, 1);
+            perm_copy[1] = '\0';
+            handle_add_access(sock, filename_copy, user_copy, perm_copy, current_user);
+        }
         }
         else if (strcmp(command, "REMACCESS") == 0) {
             char* filename = strtok(NULL, ";\n");
@@ -127,18 +141,31 @@ void* handle_connection(void* client_info_p) {
         }
         else if (strcmp(command, "CREATE") == 0) {
             char* filename = strtok(NULL, ";\n");
-            if (filename) handle_create(sock, filename, current_user);
+            if (filename) {
+                char filename_copy[100];
+                strncpy(filename_copy, filename, 99);
+                filename_copy[99] = '\0';
+                handle_create(sock, filename_copy, current_user);
+            }
         }
         else if (strcmp(command, "READ") == 0) {
             char* filename = strtok(NULL, ";\n");
-            if (filename) handle_read(sock, filename, current_user);
+            if (filename) {
+            char filename_copy[100];
+            strncpy(filename_copy, filename, 99);
+            filename_copy[99] = '\0';
+            handle_read(sock, filename_copy, current_user);
+        }
         }
         else if (strcmp(command, "WRITE") == 0) {
             char* filename = strtok(NULL, ";\n");
             char* sent_num_str = strtok(NULL, ";\n");
             if (filename && sent_num_str) {
-                handle_write(sock, filename, atoi(sent_num_str), current_user);
-            }
+            char filename_copy[100];
+            strncpy(filename_copy, filename, 99);
+            filename_copy[99] = '\0';
+            handle_write(sock, filename_copy, atoi(sent_num_str), current_user);
+        }
         }
         else if (strcmp(command, "DELETE") == 0) {
             char* filename = strtok(NULL, ";\n");
@@ -252,6 +279,7 @@ void register_storage_server(const char* ip, int port, const char* file_list_str
                 newFile->access_list = NULL; // No access list
                 newFile->next = file_list_head;
                 file_list_head = newFile;
+                ht_insert(file_hash_table, newFile->filename, newFile); // Index in hash table
                 printf("[Data] Registered existing file '%s' from SS.\n", filename);
             }
             filename = strtok(NULL, ",");
@@ -347,6 +375,8 @@ int main() {
     socklen_t client_len = sizeof(client_addr);
 
     pthread_mutex_init(&data_mutex, NULL);
+    file_hash_table = ht_create();
+    lru_init();
     load_metadata();
     server_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (server_sock == -1) {

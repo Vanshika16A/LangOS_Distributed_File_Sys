@@ -1,2 +1,1 @@
-my_persistent_file.txt;userA;127.0.0.1;9001
-newfile.txt;ss_owner;127.0.0.1;9001
+alpha.txt;userA;127.0.0.1;9001

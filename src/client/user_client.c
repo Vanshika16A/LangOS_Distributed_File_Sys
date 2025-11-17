@@ -5,7 +5,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <strings.h> // For strcasecmp
-
+#include <netinet/tcp.h>
 #define NAME_SERVER_IP "127.0.0.1"
 #define NAME_SERVER_PORT 8080
 

@@ -16,62 +16,161 @@
 #include <arpa/inet.h>
 #include "../error_codes.h" // MODIFIED INCLUDE
 #include "../logger.h"
+#include "hash_table.h"
+
 
 #define MAX_BUFFER_SIZE 1024
 #define SS_RESPONSE_LEN 4096 // For reading SS ACKs
 void save_metadata();
 void load_metadata();
-// Struct definitions (no change)
-typedef struct StorageServer {
-    char ip_addr[20];
-    int port;
-    struct StorageServer* next;
-} StorageServer;
 
-typedef struct {
-    int client_socket;
-    struct sockaddr_in client_addr;
-} client_info_t;
-
-typedef struct AccessNode {
-    char username[50];
-    char permission; // 'R' for read, 'W' for write
-    struct AccessNode* next;
-} AccessNode;
-
-typedef struct FileMetadata {
-    char filename[100];
-    char owner[50];
-    int word_count;
-    int char_count;
-    time_t last_access;
-    StorageServer* ss;
-    AccessNode* access_list;
-    struct FileMetadata* next;
-} FileMetadata;
-
-typedef struct User {
-    char username[50];
-    char ip_addr[20];
-    struct User* next;
-} User;
 
 
 FileMetadata* file_list_head = NULL;
 StorageServer* ss_list_head = NULL;
 User* user_list_head = NULL;
 pthread_mutex_t data_mutex;
+HashTable* file_hash_table = NULL;
+#define CACHE_SIZE 16 // We will cache the 16 most recently accessed files
 
-// Helper to find a file (no change)
-FileMetadata* find_file(const char* filename) {
-    FileMetadata* current = file_list_head;
-    while (current) {
-        if (strcmp(current->filename, filename) == 0) {
-            return current;
-        }
-        current = current->next;
+// A node in the cache's linked list
+typedef struct CacheNode {
+    char key[100];
+    FileMetadata* file;
+    struct CacheNode *prev, *next;
+} CacheNode;
+
+// The cache object itself
+typedef struct {
+    int size;
+    CacheNode *head, *tail;
+    HashTable* lookup; // A separate hash table to quickly find nodes WITHIN the cache
+} LRUCache;
+
+// Global pointer to our cache
+LRUCache* file_cache = NULL;
+
+// --- LRU Cache Helper Functions ---
+
+// Detaches a node from the cache's internal linked list
+void detach_node(CacheNode* node) {
+    if (node->prev) {
+        node->prev->next = node->next;
+    } else { // It was the head
+        file_cache->head = node->next;
     }
+    
+    if (node->next) {
+        node->next->prev = node->prev;
+    } else { // It was the tail
+        file_cache->tail = node->prev;
+    }
+}
+
+// Attaches a node to the front (most-recently-used position) of the list
+void attach_node(CacheNode* node) {
+    node->next = file_cache->head;
+    node->prev = NULL;
+    if (file_cache->head) {
+        file_cache->head->prev = node;
+    }
+    file_cache->head = node;
+    if (file_cache->tail == NULL) {
+        file_cache->tail = node;
+    }
+}
+
+// Tries to get a file from the cache.
+FileMetadata* lru_get(const char* key) {
+    if (!file_cache) return NULL;
+    // Use the cache's internal hash table to find the node
+    CacheNode* node = (CacheNode*) ht_search(file_cache->lookup, key);
+    
+    if (node) {
+        // CACHE HIT!
+        log_message(LOG_DEBUG, "Cache", "HIT");
+        // Move the accessed node to the front of the list
+        detach_node(node);
+        attach_node(node);
+        return node->file;
+    }
+    
+    // CACHE MISS!
+    log_message(LOG_DEBUG, "Cache", "MISS");
     return NULL;
+}
+// Puts a file into the cache.
+void lru_put(FileMetadata* file) {
+    if (!file_cache || !file) return;
+
+    // First, check if it's already in the cache
+    CacheNode* node = (CacheNode*) ht_search(file_cache->lookup, file->filename);
+    if (node) { 
+        // It exists, just move it to the front
+        detach_node(node);
+        attach_node(node);
+    } else {
+        // It's a new entry for the cache
+        if (file_cache->size == CACHE_SIZE) {
+            // Cache is full. Evict the least recently used item (the tail).
+            CacheNode* tail_node = file_cache->tail;
+            log_message(LOG_DEBUG, "Cache", "EVICT");
+            detach_node(tail_node);
+            ht_delete(file_cache->lookup, tail_node->key);
+            free(tail_node);
+            file_cache->size--;
+        }
+        
+        // Add the new file to the front of the cache
+        CacheNode* new_node = (CacheNode*)malloc(sizeof(CacheNode));
+        strcpy(new_node->key, file->filename);
+        new_node->file = file;
+        
+        attach_node(new_node);
+        // We "trick" the hash table by casting our CacheNode to a FileMetadata pointer.
+        // This is safe because we only ever access the 'key' field for searching.
+        ht_insert(file_cache->lookup, new_node->key, new_node);
+        file_cache->size++;
+    }
+}
+// +++ END OF THE CACHE CODE BLOCK +++
+
+
+// --- ADD THIS FUNCTION DEFINITION ---
+// Creates and initializes the global file_cache object
+void lru_init() {
+    file_cache = (LRUCache*)malloc(sizeof(LRUCache));
+    file_cache->size = 0;
+    file_cache->head = NULL;
+    file_cache->tail = NULL;
+    file_cache->lookup = ht_create(); // Each cache needs its own hash table
+    log_message(LOG_INFO, "Cache", "LRU Cache Initialized.");
+}
+
+// Helper to find a file (UPGRADED WITH CACHE)
+FileMetadata* find_file(const char* filename) {
+    //pthread_mutex_lock(&data_mutex); // Lock before accessing shared data
+
+    // Step 1: Try to get the file from the LRU cache.
+    FileMetadata* file = (FileMetadata*) lru_get(filename);
+    
+    if (file) {
+        // It was a cache HIT! We can unlock and return immediately.
+        //pthread_mutex_unlock(&data_mutex);
+        return file;
+    }
+
+    // Step 2: If it was a cache MISS, search the main hash table.
+    file = (FileMetadata*) ht_search(file_hash_table, filename);
+
+    // Step 3: If we found it in the main table, add it to the cache for next time.
+    if (file) {
+        lru_put(file);
+    }
+    
+    //pthread_mutex_unlock(&data_mutex);
+    return file;
+    //return ht_search(file_hash_table, filename);
 }
 
 // 'R' = Read, 'W' = Write (no change)
@@ -401,8 +500,11 @@ void handle_create(int sock, const char* filename, const char* username) {
     ownerAccess->next = NULL;
     newFile->access_list = ownerAccess;
 
+    // NEW (update both):
     newFile->next = file_list_head;
-    file_list_head = newFile;
+    file_list_head = newFile;          // Add to linked list
+    ht_insert(file_hash_table, newFile->filename, newFile); // Add to hash table index
+    // --- END MODIFICATION ---
     save_metadata();
     // We are done with global lists, unlock
     pthread_mutex_unlock(&data_mutex);
@@ -530,6 +632,7 @@ void handle_delete(int sock, const char* filename, const char* username) {
         if (strstr(ss_response, "ACK_DELETE")) {
             // --- 2. SS succeeded, now delete metadata ---
             // This is the logic from old handle_delete_metadata
+            ht_delete(file_hash_table, filename); // Remove from hash table
             FileMetadata* prev = NULL;
             FileMetadata* current = file_list_head;
             while(current) {
@@ -938,6 +1041,7 @@ void load_metadata() {
 
             newFile->next = file_list_head;
             file_list_head = newFile;
+            ht_insert(file_hash_table,newFile->filename, newFile);
         }
         fclose(meta_file);
         log_message(LOG_INFO, "Persistence", "Loaded file metadata from disk.");

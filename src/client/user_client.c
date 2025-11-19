@@ -54,54 +54,53 @@ void handle_ns_command(const char* command_str) {
     if (end_token != NULL) {
         *end_token = '\0';
     }
-    
-    char* response_type = strtok(server_reply, ";\n");
-    if (response_type == NULL) return; // Empty response
 
-    char* ip, *port_str, *filename, *sent_num_str;
+    // --- 4. NEW LOGIC: Check type BEFORE tokenizing ---
 
-    if (strcmp(response_type, "ERROR") == 0) {
-        // This is a new standardized error message
+    // Case A: ERROR
+    if (strncmp(server_reply, "ERROR", 5) == 0) {
+        // Now it is safe to tokenize
+        char* type = strtok(server_reply, ";");
         char* error_code_str = strtok(NULL, ";");
-        char* error_message = strtok(NULL, "\n"); // Get the rest
+        char* error_message = strtok(NULL, "\n");
         if (error_code_str && error_message) {
             printf("Error [%s]: %s\n", error_code_str, error_message);
         } else {
-            // This handles cases where the error from the server might not be formatted correctly
-            // or for older, non-standardized error messages.
-            printf("%s\n", response_type);
+            printf("%s\n", type);
         }
     }
-    else if (strcmp(response_type, "REDIRECT_READ") == 0) {
-        // strtok was already called, so we start with NULL
-        ip = strtok(NULL, ";");
-        port_str = strtok(NULL, ";");
-        filename = strtok(NULL, ";\n");
+    // Case B: REDIRECT
+    else if (strncmp(server_reply, "REDIRECT_", 9) == 0) {
+        char* type = strtok(server_reply, ";"); // Get the type (REDIRECT_READ, etc)
+        char* ip = strtok(NULL, ";");
+        char* port_str = strtok(NULL, ";");
+        char* filename = strtok(NULL, ";\n");
+
         if (ip && port_str && filename) {
-            handle_ss_read(ip, atoi(port_str), filename);
+            if (strcmp(type, "REDIRECT_READ") == 0) {
+                handle_ss_read(ip, atoi(port_str), filename);
+            }
+            else if (strcmp(type, "REDIRECT_WRITE") == 0) {
+                char* sent_num_str = strtok(NULL, ";\n");
+                if (sent_num_str) {
+                    handle_ss_write_session(ip, atoi(port_str), filename, atoi(sent_num_str));
+                }
+            }
+            else if (strcmp(type, "REDIRECT_STREAM") == 0) {
+                handle_ss_stream(ip, atoi(port_str), filename);
+            }
         }
     }
-    else if (strcmp(response_type, "REDIRECT_WRITE") == 0) {
-        ip = strtok(NULL, ";");
-        port_str = strtok(NULL, ";");
-        filename = strtok(NULL, ";\n");
-        sent_num_str = strtok(NULL, ";\n");
-        if (ip && port_str && filename && sent_num_str) {
-            handle_ss_write_session(ip, atoi(port_str), filename, atoi(sent_num_str));
-        }
-    }
-    else if (strcmp(response_type, "REDIRECT_STREAM") == 0) {
-        ip = strtok(NULL, ";");
-        port_str = strtok(NULL, ";");
-        filename = strtok(NULL, ";\n");
-        if (ip && port_str && filename) {
-            handle_ss_stream(ip, atoi(port_str), filename);
-        }
-    }
+    // Case C: Standard Output (VIEW, VIEWREQUESTS, etc.)
     else {
-        // Not a redirect or a standard error, just a simple message
-        // The first token is the message itself.
-        printf("%s\n", response_type);
+        // Do NOT use strtok here. Print the whole multi-line buffer.
+        printf("%s", server_reply);
+        
+        // Add a newline for formatting if the server didn't send one at the end
+        int len = strlen(server_reply);
+        if (len > 0 && server_reply[len - 1] != '\n') {
+            printf("\n");
+        }
     }
 }
 
@@ -231,6 +230,67 @@ int main() {
                 continue;
             }
             snprintf(command_to_send, sizeof(command_to_send), "EXEC;%s\n", filename);
+        }
+        else if (strcasecmp(command, "CREATEFOLDER") == 0) {
+            char* fname = strtok(NULL, " ");
+            if (!fname) { printf("Usage: CREATEFOLDER <foldername>\n"); continue; }
+            snprintf(command_to_send, sizeof(command_to_send), "CREATEFOLDER;%s\n", fname);
+        }
+        else if (strcasecmp(command, "VIEWFOLDER") == 0) {
+            char* fname = strtok(NULL, " ");
+            if (!fname) { printf("Usage: VIEWFOLDER <foldername>\n"); continue; }
+            snprintf(command_to_send, sizeof(command_to_send), "VIEWFOLDER;%s\n", fname);
+        }
+        else if (strcasecmp(command, "CHECKPOINT") == 0) {
+            char* fname = strtok(NULL, " ");
+            char* tag = strtok(NULL, " ");
+            if (!fname || !tag) { printf("Usage: CHECKPOINT <filename> <tag>\n"); continue; }
+            snprintf(command_to_send, sizeof(command_to_send), "CHECKPOINT;%s;%s\n", fname, tag);
+        }
+        else if (strcasecmp(command, "REVERT") == 0) {
+            char* fname = strtok(NULL, " ");
+            char* tag = strtok(NULL, " ");
+            if (!fname || !tag) { printf("Usage: REVERT <filename> <tag>\n"); continue; }
+            snprintf(command_to_send, sizeof(command_to_send), "REVERT;%s;%s\n", fname, tag);
+        }
+        else if (strcasecmp(command, "VIEWCHECKPOINT") == 0) {
+            char* fname = strtok(NULL, " ");
+            char* tag = strtok(NULL, " ");
+            if (!fname || !tag) { printf("Usage: VIEWCHECKPOINT <filename> <tag>\n"); continue; }
+            snprintf(command_to_send, sizeof(command_to_send), "VIEWCHECKPOINT;%s;%s\n", fname, tag);
+        }
+        else if (strcasecmp(command, "REQUESTACCESS") == 0) {
+            char* fname = strtok(NULL, " ");
+            if (!fname) { printf("Usage: REQUESTACCESS <filename>\n"); continue; }
+            snprintf(command_to_send, sizeof(command_to_send), "REQUESTACCESS;%s\n", fname);
+        }
+        else if (strcasecmp(command, "VIEWREQUESTS") == 0) {
+            char* fname = strtok(NULL, " ");
+            if (!fname) { printf("Usage: VIEWREQUESTS <filename>\n"); continue; }
+            snprintf(command_to_send, sizeof(command_to_send), "VIEWREQUESTS;%s\n", fname);
+        }
+        else if (strcasecmp(command, "APPROVE") == 0) {
+            char* fname = strtok(NULL, " ");
+            char* target = strtok(NULL, " ");
+            if (!fname || !target) { printf("Usage: APPROVE <filename> <user>\n"); continue; }
+            snprintf(command_to_send, sizeof(command_to_send), "APPROVE;%s;%s\n", fname, target);
+        }
+        else if (strcasecmp(command, "REJECT") == 0) {
+            char* fname = strtok(NULL, " ");
+            char* target = strtok(NULL, " ");
+            if (!fname || !target) { printf("Usage: REJECT <filename> <user>\n"); continue; }
+            snprintf(command_to_send, sizeof(command_to_send), "REJECT;%s;%s\n", fname, target);
+        }
+        else if (strcasecmp(command, "ANNOTATE") == 0) {
+            char* fname = strtok(NULL, " ");
+            char* note = strtok(NULL, "\n"); // Get rest of line
+            if (!fname || !note) { printf("Usage: ANNOTATE <filename> <message>\n"); continue; }
+            snprintf(command_to_send, sizeof(command_to_send), "ANNOTATE;%s;%s\n", fname, note);
+        }
+        else if (strcasecmp(command, "VIEWNOTE") == 0) {
+            char* fname = strtok(NULL, " ");
+            if (!fname) { printf("Usage: VIEWNOTE <filename>\n"); continue; }
+            snprintf(command_to_send, sizeof(command_to_send), "SHOW_ANNOTATION;%s\n", fname);
         }
         else {
             printf("Unknown command: %s\n", command);

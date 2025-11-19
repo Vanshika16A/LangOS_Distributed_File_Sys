@@ -262,6 +262,61 @@ void register_with_name_server() {
     }
     close(sock);
 }
+// Recursively creates directories
+void ensure_directory_exists(const char* filepath) {
+    char temp[256];
+    char* p = NULL;
+    size_t len;
+    printf("[SS_DEBUG] Ensuring directory for: %s\n", filepath); // Debug Print
+    snprintf(temp, sizeof(temp), "%s", filepath);
+    len = strlen(temp);
+    
+    // Remove trailing slash if present
+    if (temp[len - 1] == '/')
+        temp[len - 1] = 0;
+    
+    // Loop through string, turning / into \0 to make mkdir calls
+    // Skip the root folder (SS_ROOT_DIR) part implicitly by starting loop later if needed,
+    // but mkdir -p logic usually handles existing folders gracefully.
+    for (p = temp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = 0;
+            // Create directory (0755 = Read/Write/Execute for owner, Read/Execute for others)
+            mkdir(temp, 0755); 
+            if (mkdir(temp, 0755) == 0) {
+                printf("[SS_DEBUG] Created directory: %s\n", temp);
+            } else {
+                // It's okay if it fails because it already exists
+                 printf("[SS_DEBUG] mkdir failed for %s (likely exists)\n", temp);
+            }
+            *p = '/';
+        }
+    }
+}
+// Helper to copy file from src to dest
+int copy_file(const char* src_path, const char* dest_path) {
+    FILE* source = fopen(src_path, "rb");
+    if (!source) return -1;
+
+    // Ensure destination directory exists (reuse the function from Folder Bonus)
+    ensure_directory_exists(dest_path);
+
+    FILE* dest = fopen(dest_path, "wb");
+    if (!dest) {
+        fclose(source);
+        return -2;
+    }
+
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), source)) > 0) {
+        fwrite(buf, 1, n, dest);
+    }
+
+    fclose(source);
+    fclose(dest);
+    return 0;
+}
 
 
 // MODIFIED: Renamed 'sock' to 'conn_socket'
@@ -293,17 +348,40 @@ void* handle_ss_connection(void* arg) {
 
         if (strcmp(command, "SS_CREATE") == 0) {
             char* filename = strtok(NULL, ";\n");
+            if (!filename) {
+                printf("[SS_DEBUG] ERROR: Filename is NULL\n");
+                send(sock, "ERROR: Invalid filename\n__SS_END__\n", 30, 0);
+                continue;
+            }
+
+            printf("[SS_DEBUG] Creating file: %s\n", filename);
+
             char filepath[256];
             get_safe_path(filename, filepath);
+            
+            printf("[SS_DEBUG] Full path: %s\n", filepath);
 
             if (filepath[0]) {
+                ensure_directory_exists(filepath); // Create folders
+
                 int fd = open(filepath, O_WRONLY | O_CREAT | O_EXCL, 0644);
                 if (fd == -1) {
-                    send(sock, "ERROR: File exists or cannot create\n__SS_END__\n", 43, 0);
+                    printf("[SS_DEBUG] Open failed (File exists or perm error)\n");
+                    // Send specific error message
+                    char err_msg[] = "ERROR: File exists or cannot create\n__SS_END__\n";
+                    send(sock, err_msg, strlen(err_msg), 0);
                 } else {
+                    printf("[SS_DEBUG] File created successfully. Sending ACK.\n");
                     close(fd);
-                    send(sock, "ACK_CREATE\n__SS_END__\n", 21, 0);
+                    
+                    // Use strlen to ensure we send the full string
+                    char ack_msg[] = "ACK_CREATE\n__SS_END__\n";
+                    send(sock, ack_msg, strlen(ack_msg), 0);
+                    printf("[SS_DEBUG] ACK sent.\n");
                 }
+            } else {
+                 printf("[SS_DEBUG] Invalid path generated.\n");
+                 send(sock, "ERROR: Invalid path\n__SS_END__\n", 26, 0);
             }
         }
         else if (strcmp(command, "SS_READ") == 0) {
@@ -408,6 +486,69 @@ void* handle_ss_connection(void* arg) {
                 send(sock, "ERROR: No backup found or rename failed\n__SS_END__\n", 49, 0);
             }
         }
+        // --- BONUS: CHECKPOINT ---
+        else if (strcmp(command, "SS_CHECKPOINT") == 0) {
+            char* filename = strtok(NULL, ";\n");
+            char* tag = strtok(NULL, ";\n");
+            
+            char src_path[256];
+            char dest_path[512];
+            get_safe_path(filename, src_path);
+            
+            // Construct path: ss_files/.checkpoints/<filename>.<tag>
+            snprintf(dest_path, sizeof(dest_path), "%s/.checkpoints/%s.%s", SS_ROOT_DIR, filename, tag);
+            
+            printf("[SS] Creating checkpoint: %s -> %s\n", src_path, dest_path);
+            
+            if (copy_file(src_path, dest_path) == 0) {
+                send(sock, "ACK_CHECKPOINT\n__SS_END__\n", 25, 0);
+            } else {
+                send(sock, "ERROR: Checkpoint failed (File not found?)\n__SS_END__\n", 43, 0);
+            }
+        }
+        
+        // --- BONUS: REVERT ---
+        else if (strcmp(command, "SS_REVERT") == 0) {
+            char* filename = strtok(NULL, ";\n");
+            char* tag = strtok(NULL, ";\n");
+            
+            char live_path[256];
+            char checkpoint_path[512];
+            get_safe_path(filename, live_path);
+            snprintf(checkpoint_path, sizeof(checkpoint_path), "%s/.checkpoints/%s.%s", SS_ROOT_DIR, filename, tag);
+            
+            printf("[SS] Reverting file: %s <- %s\n", live_path, checkpoint_path);
+            
+            // Copy Checkpoint -> Live File
+            if (copy_file(checkpoint_path, live_path) == 0) {
+                send(sock, "ACK_REVERT\n__SS_END__\n", 21, 0);
+            } else {
+                send(sock, "ERROR: Revert failed (Checkpoint not found)\n__SS_END__\n", 44, 0);
+            }
+        }
+
+        // --- BONUS: VIEW CHECKPOINT (Reuse SS_READ logic mostly) ---
+        else if (strcmp(command, "SS_READ_CHECKPOINT") == 0) {
+            char* filename = strtok(NULL, ";\n");
+            char* tag = strtok(NULL, ";\n");
+            
+            char checkpoint_path[512];
+            snprintf(checkpoint_path, sizeof(checkpoint_path), "%s/.checkpoints/%s.%s", SS_ROOT_DIR, filename, tag);
+            
+            FILE* f = fopen(checkpoint_path, "r");
+            if (!f) {
+                send(sock, "ERROR: Checkpoint not found\n__SS_END__\n", 38, 0);
+            } else {
+                char file_buf[1024];
+                size_t nbytes;
+                while((nbytes = fread(file_buf, 1, 1024, f)) > 0) {
+                    send(sock, file_buf, nbytes, 0);
+                }
+                fclose(f);
+                send(sock, "\n__SS_END__\n", 12, 0);
+            }
+        }
+        
     }
 
     while(write_head) {

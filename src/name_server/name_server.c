@@ -195,6 +195,56 @@ void* handle_connection(void* client_info_p) {
             if(filename)
                 handle_exec(sock, filename, current_user);
         }
+        else if (strcmp(command, "CREATEFOLDER") == 0) {
+            char* fname = strtok(NULL, ";\n");
+            if (fname) handle_create_folder(sock, fname, current_user);
+        }
+        else if (strcmp(command, "VIEWFOLDER") == 0) {
+            char* fname = strtok(NULL, ";\n");
+            if (fname) handle_view_folder(sock, fname);
+        }
+        else if (strcmp(command, "CHECKPOINT") == 0) {
+            char* fname = strtok(NULL, ";\n");
+            char* tag = strtok(NULL, ";\n");
+            if(fname && tag) handle_checkpoint(sock, fname, tag, current_user);
+        }
+        else if (strcmp(command, "REVERT") == 0) {
+            char* fname = strtok(NULL, ";\n");
+            char* tag = strtok(NULL, ";\n");
+            if(fname && tag) handle_revert(sock, fname, tag, current_user);
+        }
+        else if (strcmp(command, "VIEWCHECKPOINT") == 0) {
+            char* fname = strtok(NULL, ";\n");
+            char* tag = strtok(NULL, ";\n");
+            if(fname && tag) handle_view_checkpoint(sock, fname, tag, current_user);
+        }
+        else if (strcmp(command, "REQUESTACCESS") == 0) {
+            char* fname = strtok(NULL, ";\n");
+            if(fname) handle_req_access(sock, fname, current_user);
+        }
+        else if (strcmp(command, "VIEWREQUESTS") == 0) {
+            char* fname = strtok(NULL, ";\n");
+            if(fname) handle_view_reqs(sock, fname, current_user);
+        }
+        else if (strcmp(command, "APPROVE") == 0) {
+            char* fname = strtok(NULL, ";\n");
+            char* target = strtok(NULL, ";\n");
+            if(fname && target) handle_approve_req(sock, fname, target, current_user);
+        }
+        else if (strcmp(command, "REJECT") == 0) {
+            char* fname = strtok(NULL, ";\n");
+            char* target = strtok(NULL, ";\n");
+            if(fname && target) handle_reject_req(sock, fname, target, current_user);
+        }
+        else if (strcmp(command, "ANNOTATE") == 0) {
+            char* fname = strtok(NULL, ";\n");
+            char* note = strtok(NULL, "\n"); // Get rest of line
+            if(fname && note) handle_annotate(sock, fname, note, current_user);
+        }
+        else if (strcmp(command, "SHOW_ANNOTATION") == 0) {
+            char* fname = strtok(NULL, ";\n");
+            if(fname) handle_show_annotation(sock, fname);
+        }
         else {
             char response[] = "ERROR: Unknown command.\n__END__\n";
             send(sock, response, strlen(response), 0);

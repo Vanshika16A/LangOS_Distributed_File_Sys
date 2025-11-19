@@ -19,10 +19,15 @@ typedef struct AccessNode {
     char permission; // 'R' for read, 'W' for write
     struct AccessNode* next;
 } AccessNode;
+typedef struct RequestNode {
+    char username[50];
+    struct RequestNode* next;
+} RequestNode;
 
 // Contains all metadata for a single file
 typedef struct FileMetadata {
     char filename[100];
+    int is_directory; // 1 if directory, 0 if regular file
     char owner[50];
     int word_count;
     int char_count;
@@ -30,6 +35,10 @@ typedef struct FileMetadata {
     struct StorageServer* ss; // Pointer to the SS that holds this file
     AccessNode* access_list;
     struct FileMetadata* next; // Pointer for the main linked list
+    RequestNode* pending_requests;
+    // --- UNIQUE FEATURE ---
+    char annotation[256]; // Stores the sticky note
+    // ----------------------
 } FileMetadata;
 
 // Describes a registered Storage Server

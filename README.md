@@ -6,7 +6,9 @@ You can copy-paste this directly into your repository.
 
 # Docs++: The Distributed File System
 
-> **⚠️ IMPORTANT:** The stable, feature-complete version of this project is located in the **`fixed-hashtable`** branch. Please ensure you are on this branch before compiling.
+> **⚠️ IMPORTANT:** This project was originally developed as part of a GitHub Classroom course.
+This public repository is a copy created for portfolio purposes.
+
 
 **Docs++** is a robust, distributed file system designed for secure, concurrent document collaboration. Built from the ground up in C, it implements a sophisticated client-server architecture enabling multiple users to create, edit, and manage files across distributed storage nodes with real-time synchronization.
 
